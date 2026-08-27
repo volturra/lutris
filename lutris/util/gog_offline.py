@@ -7,6 +7,7 @@ a product ID to a slug for banners.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import zipfile
@@ -77,6 +78,11 @@ def is_archive_path(path: str) -> bool:
     # .tar.gz etc.
     lower = path.lower()
     return lower.endswith(".tar.gz") or lower.endswith(".tar.bz2") or lower.endswith(".tar.xz")
+
+
+def is_generic_windows_setup(path: str) -> bool:
+    """True if path is a Windows .exe usable as a fallback wineexec installer."""
+    return bool(path) and os.path.isfile(path) and path.lower().endswith(".exe")
 
 
 def bin_volume_stem(filename: str) -> str | None:
@@ -366,19 +372,65 @@ def resolve_gog_offline_packages(path: str, inspect_fn: InspectFn | None = None)
     return scan_gog_offline_directory(os.path.dirname(path), preferred_path=path, inspect_fn=inspect_fn)
 
 
-def _extract_archive_to_cache(archive_path: str) -> str | None:
-    import uuid
+_EXTRACT_SENTINEL = ".lutris-complete"
 
+
+def _gog_offline_cache_root() -> str:
     from lutris import settings
+
+    return os.path.join(settings.CACHE_DIR, "gog-offline")
+
+
+def _archive_cache_dir(archive_path: str) -> str:
+    st = os.stat(archive_path)
+    key = "%s:%s:%s" % (os.path.abspath(archive_path), st.st_mtime_ns, st.st_size)
+    digest = hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()[:16]
+    return os.path.join(_gog_offline_cache_root(), digest)
+
+
+def _cleanup_gog_offline_cache(keep: str | None = None) -> None:
+    """Keep at most one extracted archive. Drops sibling extract dirs."""
+    from lutris.util import system
+
+    root = _gog_offline_cache_root()
+    if not os.path.isdir(root):
+        return
+    keep_abs = os.path.abspath(keep) if keep else None
+    for name in os.listdir(root):
+        path = os.path.join(root, name)
+        if keep_abs and os.path.abspath(path) == keep_abs:
+            continue
+        if os.path.isdir(path):
+            system.delete_folder(path)
+
+
+def _extract_archive_to_cache(archive_path: str) -> str | None:
+    from lutris.util import system
     from lutris.util.extract import extract_archive
 
-    dest = os.path.join(settings.CACHE_DIR, "gog-offline", str(uuid.uuid4()))
+    try:
+        dest = _archive_cache_dir(archive_path)
+    except OSError as ex:
+        logger.error("Unable to stat GOG offline archive %s: %s", archive_path, ex)
+        return None
+
+    sentinel = os.path.join(dest, _EXTRACT_SENTINEL)
+    if os.path.isfile(sentinel):
+        return dest
+
+    if os.path.isdir(dest):
+        system.delete_folder(dest)
+
     os.makedirs(dest, exist_ok=True)
     try:
         extract_archive(archive_path, dest, merge_single=True)
+        with open(sentinel, "wb"):
+            pass
     except Exception as ex:
         logger.error("Failed to extract GOG offline archive %s: %s", archive_path, ex)
+        system.delete_folder(dest)
         return None
+    _cleanup_gog_offline_cache(keep=dest)
     return dest
 
 

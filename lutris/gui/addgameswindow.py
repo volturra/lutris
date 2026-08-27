@@ -17,6 +17,7 @@ from lutris.util import datapath
 from lutris.util.gog_offline import (
     build_offline_installer,
     is_archive_path,
+    is_generic_windows_setup,
     lookup_lutris_slug_for_gogid,
     resolve_gog_offline_packages,
 )
@@ -541,8 +542,11 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             ErrorDialog(_("No GOG installers were found in that folder."), parent=self)
             self.present_install_from_setup_page()
             return
-        if not packages and not os.path.isfile(path):
-            ErrorDialog(_("You must select a setup file or folder."), parent=self)
+        if not packages and not is_generic_windows_setup(path):
+            ErrorDialog(
+                _("Select a GOG setup file, a folder of installers, or a Windows .exe."),
+                parent=self,
+            )
             self.present_install_from_setup_page()
             return
         self._load_setup_packages(packages)
@@ -606,6 +610,12 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             )
         else:
             setup_path = self._setup_selected_path
+            if not is_generic_windows_setup(setup_path):
+                ErrorDialog(
+                    _("Select a GOG setup file, a folder of installers, or a Windows .exe."),
+                    parent=self,
+                )
+                return
             installer = {
                 "name": name,
                 "version": _("Setup file"),

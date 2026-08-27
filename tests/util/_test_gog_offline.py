@@ -10,6 +10,7 @@ from lutris.util.gog_offline import (
     build_offline_installer,
     filename_name_tokens,
     group_gog_files,
+    is_generic_windows_setup,
     parse_innoextract_info,
     resolve_gog_offline_packages,
     scan_gog_offline_directory,
@@ -72,6 +73,19 @@ class TestFilenameHelpers(TestCase):
 
     def test_title_from_filename(self):
         self.assertEqual(title_from_filename("setup_stellaris_3.8_(1).exe"), "Stellaris")
+
+    def test_generic_windows_setup_is_exe_only(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "setup.exe")
+            volume = os.path.join(tmp, "setup-1.bin")
+            script = os.path.join(tmp, "game.sh")
+            _touch(exe)
+            _touch(volume)
+            _touch(script)
+            self.assertTrue(is_generic_windows_setup(exe))
+            self.assertFalse(is_generic_windows_setup(volume))
+            self.assertFalse(is_generic_windows_setup(script))
+            self.assertFalse(is_generic_windows_setup(tmp))
 
 
 class TestGroupGogFiles(TestCase):
@@ -194,6 +208,45 @@ class TestResolvePath(TestCase):
             _touch(exe)
             packages = scan_gog_offline_directory(tmp, preferred_path=exe, inspect_fn=lambda _path: (None, None))
             self.assertEqual(packages, [])
+
+
+class TestArchiveCache(TestCase):
+    def test_reuses_extract_and_drops_sibling_dirs(self):
+        with TemporaryDirectory() as tmp:
+            archive = os.path.join(tmp, "game.zip")
+            _touch(archive)
+            cache_root = os.path.join(tmp, "cache")
+            stale = os.path.join(cache_root, "gog-offline", "olduuid")
+            os.makedirs(stale)
+            _touch(os.path.join(stale, "junk.bin"))
+
+            def fake_extract(_path, dest, merge_single=True):
+                _touch(os.path.join(dest, "setup_game_1.0_(1).exe"))
+
+            with patch("lutris.settings.CACHE_DIR", cache_root):
+                with patch("lutris.util.extract.extract_archive", side_effect=fake_extract) as extract:
+                    first = resolve_gog_offline_packages(archive, inspect_fn=lambda _path: ("Game", "1"))
+                    second = resolve_gog_offline_packages(archive, inspect_fn=lambda _path: ("Game", "1"))
+
+            self.assertEqual(len(first), 1)
+            self.assertEqual(first[0].exe_path, second[0].exe_path)
+            self.assertEqual(extract.call_count, 1)
+            self.assertFalse(os.path.isdir(stale))
+            cached = os.listdir(os.path.join(cache_root, "gog-offline"))
+            self.assertEqual(len(cached), 1)
+
+    def test_failed_extract_does_not_leave_dir(self):
+        with TemporaryDirectory() as tmp:
+            archive = os.path.join(tmp, "game.zip")
+            _touch(archive)
+            cache_root = os.path.join(tmp, "cache")
+            with patch("lutris.settings.CACHE_DIR", cache_root):
+                with patch("lutris.util.extract.extract_archive", side_effect=RuntimeError("boom")):
+                    packages = resolve_gog_offline_packages(archive)
+            self.assertEqual(packages, [])
+            cache_dir = os.path.join(cache_root, "gog-offline")
+            if os.path.isdir(cache_dir):
+                self.assertEqual(os.listdir(cache_dir), [])
 
 
 class TestBuildOfflineInstaller(TestCase):
