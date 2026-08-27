@@ -211,7 +211,7 @@ class TestResolvePath(TestCase):
 
 
 class TestArchiveCache(TestCase):
-    def test_reuses_extract_and_drops_sibling_dirs(self):
+    def test_reuses_extract_and_keeps_sibling_dirs(self):
         with TemporaryDirectory() as tmp:
             archive = os.path.join(tmp, "game.zip")
             _touch(archive)
@@ -231,9 +231,9 @@ class TestArchiveCache(TestCase):
             self.assertEqual(len(first), 1)
             self.assertEqual(first[0].exe_path, second[0].exe_path)
             self.assertEqual(extract.call_count, 1)
-            self.assertFalse(os.path.isdir(stale))
+            self.assertTrue(os.path.isfile(os.path.join(stale, "junk.bin")))
             cached = os.listdir(os.path.join(cache_root, "gog-offline"))
-            self.assertEqual(len(cached), 1)
+            self.assertEqual(len(cached), 2)
 
     def test_failed_extract_does_not_leave_dir(self):
         with TemporaryDirectory() as tmp:
@@ -260,6 +260,7 @@ class TestBuildOfflineInstaller(TestCase):
         self.assertEqual(installer["gogid"], "111")
         self.assertEqual(installer["game_slug"], "game")
         self.assertEqual(installer["script"]["game"]["exe"], AUTO_WIN32_EXE)
+        self.assertEqual(installer["script"]["game"]["arch"], "win64")
         files = installer["script"]["files"]
         self.assertEqual(files[0]["gogsetup0"]["local_path"], "/data/setup_game.exe")
         self.assertTrue(files[0]["gogsetup0"]["url"].startswith("N/A:"))
@@ -267,7 +268,20 @@ class TestBuildOfflineInstaller(TestCase):
         self.assertEqual(steps[0], {"autosetup_gog_game": "gogsetup0"})
         self.assertEqual(steps[1]["task"]["name"], "wineexec")
         self.assertEqual(steps[1]["task"]["executable"], "gogsetup1")
+        self.assertEqual(steps[1]["task"]["arch"], "win64")
         self.assertNotIn("gog", installer["version"].lower())
+
+    def test_win32_preset_sets_game_and_wineexec_arch(self):
+        packages = [
+            GogOfflinePackage(exe_path="/data/setup_game.exe", title="Game", kind="windows"),
+            GogOfflinePackage(exe_path="/data/setup_game_dlc.exe", title="DLC", kind="windows"),
+        ]
+        installer = build_offline_installer(
+            packages, name="Game", game_slug="game", wine_arch="win32", win_ver="winxp"
+        )
+        self.assertEqual(installer["script"]["game"]["arch"], "win32")
+        self.assertEqual(installer["script"]["installer"][0]["task"]["arch"], "win32")
+        self.assertEqual(installer["script"]["installer"][2]["task"]["arch"], "win32")
 
     def test_linux_extracts_each_sh(self):
         packages = [

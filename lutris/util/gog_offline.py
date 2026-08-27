@@ -388,22 +388,6 @@ def _archive_cache_dir(archive_path: str) -> str:
     return os.path.join(_gog_offline_cache_root(), digest)
 
 
-def _cleanup_gog_offline_cache(keep: str | None = None) -> None:
-    """Keep at most one extracted archive. Drops sibling extract dirs."""
-    from lutris.util import system
-
-    root = _gog_offline_cache_root()
-    if not os.path.isdir(root):
-        return
-    keep_abs = os.path.abspath(keep) if keep else None
-    for name in os.listdir(root):
-        path = os.path.join(root, name)
-        if keep_abs and os.path.abspath(path) == keep_abs:
-            continue
-        if os.path.isdir(path):
-            system.delete_folder(path)
-
-
 def _extract_archive_to_cache(archive_path: str) -> str | None:
     from lutris.util import system
     from lutris.util.extract import extract_archive
@@ -430,7 +414,6 @@ def _extract_archive_to_cache(archive_path: str) -> str | None:
         logger.error("Failed to extract GOG offline archive %s: %s", archive_path, ex)
         system.delete_folder(dest)
         return None
-    _cleanup_gog_offline_cache(keep=dest)
     return dest
 
 
@@ -506,6 +489,7 @@ def build_offline_installer(
                         "name": "wineexec",
                         "executable": file_id,
                         "prefix": "$GAMEDIR",
+                        "arch": wine_arch,
                         "args": "/SP- /NOCANCEL",
                     }
                 }
@@ -516,7 +500,7 @@ def build_offline_installer(
         game_config = {"exe": AUTO_ELF_EXE}
     else:
         runner = "wine"
-        game_config = {"exe": AUTO_WIN32_EXE, "prefix": "$GAMEDIR"}
+        game_config = {"exe": AUTO_WIN32_EXE, "prefix": "$GAMEDIR", "arch": wine_arch}
 
     script: dict = {
         "game": game_config,
