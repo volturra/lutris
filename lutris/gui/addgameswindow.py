@@ -443,11 +443,11 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.install_from_setup_game_slug_entry.set_text(slug)
 
     def present_install_from_setup_page(self):
-        self._setup_scan_generation += 1
-        self.continue_button.set_sensitive(True)
+        self._invalidate_setup_scan()
         self.set_page_title_markup(_("<b>Select setup file</b>"))
         self.stack.present_page("install_from_setup")
         self.display_continue_button(self._on_setup_file_continue, label=_("_Continue"))
+        return self._invalidate_setup_scan
 
     def present_install_from_setup_options_page(self):
         self.set_page_title_markup(_("<b>Install from setup file</b>"))
@@ -500,6 +500,10 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             self._setup_updating_name = False
             self._setup_name_user_edited = False
 
+    def _invalidate_setup_scan(self):
+        self._setup_scan_generation += 1
+        self.continue_button.set_sensitive(True)
+
     def _load_setup_packages(self, packages):
         self.setup_packages_store.clear()
         self._setup_name_user_edited = False
@@ -539,6 +543,8 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
 
     def _on_setup_packages_scanned(self, generation, packages, error):
         if generation != self._setup_scan_generation:
+            return
+        if self.stack.get_visible_child_name() != "install_from_setup":
             return
         self.continue_button.set_sensitive(True)
         if error:
