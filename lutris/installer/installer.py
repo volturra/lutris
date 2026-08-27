@@ -182,7 +182,7 @@ class LutrisInstaller:  # pylint: disable=too-many-instance-attributes
         installer_file_url = None
         if self.service:
             for file in self.script_files:
-                if file.url.startswith("N/A"):
+                if file.url.startswith("N/A") and not file.is_dest_file_overridden:
                     installer_file_id = file.id
                     installer_file_url = file.url
                     break

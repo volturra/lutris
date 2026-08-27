@@ -151,7 +151,13 @@ class InstallerFileBox(Gtk.VBox):
             label = InstallerLabel(self.installer_file.get_label())
             label.props.can_focus = True
             box.pack_start(label, False, False, 0)
-            location_entry = FileChooserEntry(self.installer_file.human_url, Gtk.FileChooserAction.OPEN)
+            dest = self.installer_file.dest_file if self.installer_file.is_dest_file_overridden else None
+            location_entry = FileChooserEntry(
+                self.installer_file.human_url,
+                Gtk.FileChooserAction.OPEN,
+                text=dest,
+                default_path=dest,
+            )
             location_entry.connect("changed", self.on_location_changed)
             location_entry.show()
             box.pack_start(location_entry, False, False, 0)
