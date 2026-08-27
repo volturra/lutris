@@ -1,5 +1,5 @@
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -113,3 +113,28 @@ class TestScriptInterpreter(TestCase):
         with patch("lutris.installer.installer.ModDB.transform_url", side_effect=RuntimeError("Invalid ModDB URL")):
             with self.assertRaises(RuntimeError):
                 interpreter.installer.prepare_game_files([])
+
+    def test_prepare_game_files_keeps_local_path_instead_of_service_download(self):
+        installer = {
+            **TEST_INSTALLER,
+            "script": {
+                "files": [
+                    {
+                        "gogsetup0": {
+                            "url": "N/A:Select the installer from GOG",
+                            "filename": "setup_game.exe",
+                            "local_path": "/data/setup_game.exe",
+                        }
+                    }
+                ],
+                "game": {"exe": "test"},
+            },
+        }
+        interpreter = MockInterpreter(installer, None)
+        service = MagicMock()
+        interpreter.installer.service = service
+        interpreter.installer.prepare_game_files([])
+        service.get_installer_files.assert_not_called()
+        installer_file = interpreter.installer.files[0]
+        self.assertEqual(installer_file.dest_file, "/data/setup_game.exe")
+        self.assertTrue(installer_file.is_dest_file_overridden)

@@ -1,0 +1,294 @@
+import os
+from tempfile import TemporaryDirectory
+from unittest import TestCase
+from unittest.mock import patch
+
+from lutris.installer import AUTO_ELF_EXE, AUTO_WIN32_EXE
+from lutris.util.gog_offline import (
+    GogOfflinePackage,
+    bin_volume_stem,
+    build_offline_installer,
+    filename_name_tokens,
+    group_gog_files,
+    parse_innoextract_info,
+    resolve_gog_offline_packages,
+    scan_gog_offline_directory,
+    suggest_package_order,
+    title_from_filename,
+)
+
+
+def _touch(path, size=10):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(b"x" * size)
+
+
+class TestParseInnoextractInfo(TestCase):
+    def test_inspecting_quoted_title_and_gog_id(self):
+        output = (
+            'Inspecting "The Witcher 3: Wild Hunt" - setup data version 5.6.2 (unicode)\n'
+            "Extracting from setup.exe ; 2.1 GiB\n"
+            "GOG.com game ID: 1207664663\n"
+        )
+        title, gogid = parse_innoextract_info(output)
+        self.assertEqual(title, "The Witcher 3: Wild Hunt")
+        self.assertEqual(gogid, "1207664663")
+
+    def test_gog_id_without_dot_com(self):
+        title, gogid = parse_innoextract_info("GOG game ID 1495134320\n")
+        self.assertIsNone(title)
+        self.assertEqual(gogid, "1495134320")
+
+    def test_bare_numeric_gog_id(self):
+        title, gogid = parse_innoextract_info("1207664663")
+        self.assertIsNone(title)
+        self.assertEqual(gogid, "1207664663")
+
+    def test_empty_output(self):
+        self.assertEqual(parse_innoextract_info(""), (None, None))
+
+
+class TestFilenameHelpers(TestCase):
+    def test_bin_volume_stem(self):
+        self.assertEqual(bin_volume_stem("setup_foo_1.0_(99)-1.bin"), "setup_foo_1.0_(99)")
+        self.assertEqual(bin_volume_stem("setup_foo_1.0_(99)-12.bin"), "setup_foo_1.0_(99)")
+        self.assertIsNone(bin_volume_stem("setup_foo_1.0_(99).exe"))
+        self.assertIsNone(bin_volume_stem("readme.bin"))
+
+    def test_name_tokens_strip_version_and_build(self):
+        self.assertEqual(
+            filename_name_tokens("setup_stellaris_3.8_(12345).exe"),
+            ("stellaris",),
+        )
+        self.assertEqual(
+            filename_name_tokens("setup_stellaris_utopia_3.8_(12346).exe"),
+            ("stellaris", "utopia"),
+        )
+        self.assertEqual(
+            filename_name_tokens("setup_the_witcher_3_wild_hunt_3.0.0_(12345).exe"),
+            ("the", "witcher", "3", "wild", "hunt"),
+        )
+
+    def test_title_from_filename(self):
+        self.assertEqual(title_from_filename("setup_stellaris_3.8_(1).exe"), "Stellaris")
+
+
+class TestGroupGogFiles(TestCase):
+    def test_groups_bins_onto_matching_exe(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "setup_foo_1.0_(99).exe")
+            bin1 = os.path.join(tmp, "setup_foo_1.0_(99)-1.bin")
+            bin2 = os.path.join(tmp, "setup_foo_1.0_(99)-2.bin")
+            dlc = os.path.join(tmp, "setup_foo_bar_1.0_(100).exe")
+            dlc_bin = os.path.join(tmp, "setup_foo_bar_1.0_(100)-1.bin")
+            orphan = os.path.join(tmp, "setup_missing_1.0_(1)-1.bin")
+            for path, size in ((exe, 50), (bin1, 10), (bin2, 10), (dlc, 20), (dlc_bin, 5), (orphan, 8)):
+                _touch(path, size)
+
+            packages = group_gog_files([exe, bin1, bin2, dlc, dlc_bin, orphan])
+            self.assertEqual(len(packages), 2)
+            by_name = {p.filename: p for p in packages}
+            self.assertEqual(len(by_name["setup_foo_1.0_(99).exe"].bin_paths), 2)
+            self.assertEqual(by_name["setup_foo_1.0_(99).exe"].size, 70)
+            self.assertEqual(len(by_name["setup_foo_bar_1.0_(100).exe"].bin_paths), 1)
+            self.assertEqual(by_name["setup_foo_1.0_(99).exe"].role, "setup")
+
+    def test_patch_role(self):
+        with TemporaryDirectory() as tmp:
+            patch = os.path.join(tmp, "patch_foo_1.1_(99).exe")
+            _touch(patch, 3)
+            packages = group_gog_files([patch])
+            self.assertEqual(packages[0].role, "patch")
+
+
+class TestSuggestPackageOrder(TestCase):
+    def _pkg(self, filename, role="setup", directory="/tmp"):
+        return GogOfflinePackage(
+            exe_path=os.path.join(directory, filename),
+            title=filename,
+            role=role,
+        )
+
+    def test_unique_filename_prefix_is_first(self):
+        packages = [
+            self._pkg("setup_stellaris_utopia_3.8_(2).exe"),
+            self._pkg("setup_stellaris_3.8_(1).exe"),
+            self._pkg("patch_stellaris_3.9_(3).exe", role="patch"),
+        ]
+        ordered = suggest_package_order(packages)
+        self.assertEqual(ordered[0].filename, "setup_stellaris_3.8_(1).exe")
+        self.assertEqual(ordered[-1].filename, "patch_stellaris_3.9_(3).exe")
+        self.assertEqual(ordered[1].filename, "setup_stellaris_utopia_3.8_(2).exe")
+
+    def test_no_unique_prefix_keeps_stable_order(self):
+        packages = [
+            self._pkg("setup_the_witcher_3_hearts_of_stone_1.0_(1).exe"),
+            self._pkg("setup_the_witcher_3_wild_hunt_1.0_(2).exe"),
+            self._pkg("setup_the_witcher_3_blood_and_wine_1.0_(3).exe"),
+        ]
+        ordered = suggest_package_order(packages)
+        self.assertEqual([p.filename for p in ordered], [p.filename for p in packages])
+
+    def test_preferred_exe_wins_over_prefix(self):
+        packages = [
+            self._pkg("setup_stellaris_3.8_(1).exe"),
+            self._pkg("setup_stellaris_utopia_3.8_(2).exe"),
+        ]
+        preferred = packages[1].exe_path
+        ordered = suggest_package_order(packages, preferred_path=preferred)
+        self.assertEqual(ordered[0].filename, "setup_stellaris_utopia_3.8_(2).exe")
+
+    def test_size_is_not_used(self):
+        big_dlc = self._pkg("setup_game_mega_dlc_1.0_(2).exe")
+        big_dlc.size = 50_000
+        base = self._pkg("setup_game_1.0_(1).exe")
+        base.size = 10
+        ordered = suggest_package_order([big_dlc, base])
+        self.assertEqual(ordered[0].filename, "setup_game_1.0_(1).exe")
+
+
+class TestScanDirectory(TestCase):
+    def test_scan_groups_and_inspects(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "setup_game_1.0_(1).exe")
+            bin1 = os.path.join(tmp, "setup_game_1.0_(1)-1.bin")
+            dlc = os.path.join(tmp, "setup_game_dlc_1.0_(2).exe")
+            _touch(exe)
+            _touch(bin1)
+            _touch(dlc)
+
+            def inspect(path):
+                if path.endswith("setup_game_1.0_(1).exe"):
+                    return "Cool Game", "111"
+                return "Cool Game DLC", "222"
+
+            packages = scan_gog_offline_directory(tmp, inspect_fn=inspect)
+            self.assertEqual(len(packages), 2)
+            self.assertEqual(packages[0].title, "Cool Game")
+            self.assertEqual(packages[0].gogid, "111")
+            self.assertEqual(len(packages[0].bin_paths), 1)
+            self.assertEqual(packages[1].title, "Cool Game DLC")
+
+
+class TestResolvePath(TestCase):
+    def test_file_scan_uses_parent_directory(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "setup_game_1.0_(1).exe")
+            dlc = os.path.join(tmp, "setup_game_dlc_1.0_(2).exe")
+            _touch(exe)
+            _touch(dlc)
+
+            def inspect(path):
+                if path.endswith("setup_game_1.0_(1).exe"):
+                    return "Cool Game", "111"
+                return "Cool Game DLC", "222"
+
+            packages = resolve_gog_offline_packages(exe, inspect_fn=inspect)
+            self.assertEqual(len(packages), 2)
+            self.assertEqual(packages[0].filename, "setup_game_1.0_(1).exe")
+
+    def test_non_gog_exe_is_omitted_without_gog_id(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "SomeInstaller.exe")
+            _touch(exe)
+            packages = scan_gog_offline_directory(tmp, preferred_path=exe, inspect_fn=lambda _path: (None, None))
+            self.assertEqual(packages, [])
+
+
+class TestBuildOfflineInstaller(TestCase):
+    def test_windows_chains_autosetup_then_wineexec(self):
+        packages = [
+            GogOfflinePackage(exe_path="/data/setup_game.exe", title="Game", gogid="111", kind="windows"),
+            GogOfflinePackage(exe_path="/data/setup_game_dlc.exe", title="DLC", gogid="222", kind="windows"),
+        ]
+        installer = build_offline_installer(packages, name="Game", game_slug="game")
+        self.assertEqual(installer["runner"], "wine")
+        self.assertEqual(installer["gogid"], "111")
+        self.assertEqual(installer["game_slug"], "game")
+        self.assertEqual(installer["script"]["game"]["exe"], AUTO_WIN32_EXE)
+        files = installer["script"]["files"]
+        self.assertEqual(files[0]["gogsetup0"]["local_path"], "/data/setup_game.exe")
+        self.assertTrue(files[0]["gogsetup0"]["url"].startswith("N/A:"))
+        steps = installer["script"]["installer"]
+        self.assertEqual(steps[0], {"autosetup_gog_game": "gogsetup0"})
+        self.assertEqual(steps[1]["task"]["name"], "wineexec")
+        self.assertEqual(steps[1]["task"]["executable"], "gogsetup1")
+        self.assertNotIn("gog", installer["version"].lower())
+
+    def test_linux_extracts_each_sh(self):
+        packages = [
+            GogOfflinePackage(exe_path="/data/game.sh", title="Game", kind="linux"),
+            GogOfflinePackage(exe_path="/data/dlc.sh", title="DLC", kind="linux"),
+        ]
+        installer = build_offline_installer(packages, name="Game", game_slug="game")
+        self.assertEqual(installer["runner"], "linux")
+        self.assertEqual(installer["script"]["game"]["exe"], AUTO_ELF_EXE)
+        steps = installer["script"]["installer"]
+        self.assertEqual(steps[0]["extract"]["file"], "gogsetup0")
+        self.assertEqual(steps[1]["merge"]["dst"], "$GAMEDIR")
+        self.assertEqual(steps[2]["extract"]["file"], "gogsetup1")
+        self.assertNotIn("wineexec", str(steps))
+        self.assertNotIn("autosetup_gog_game", str(steps))
+
+    def test_mixed_linux_and_windows_raise(self):
+        packages = [
+            GogOfflinePackage(exe_path="/data/game.sh", title="Game", kind="linux"),
+            GogOfflinePackage(exe_path="/data/setup_game.exe", title="Game Win", kind="windows"),
+        ]
+        with self.assertRaises(ValueError):
+            build_offline_installer(packages, name="Game", game_slug="game")
+
+    def test_empty_raises(self):
+        with self.assertRaises(ValueError):
+            build_offline_installer([], name="x", game_slug="x")
+
+
+class TestLookupSlug(TestCase):
+    @patch("lutris.api.get_api_games", return_value=[{"slug": "the-witcher-3-wild-hunt"}])
+    def test_maps_gogid_via_lutris_net(self, _mock):
+        from lutris.util.gog_offline import lookup_lutris_slug_for_gogid
+
+        self.assertEqual(lookup_lutris_slug_for_gogid("1207664663"), "the-witcher-3-wild-hunt")
+
+    @patch("lutris.api.get_api_games", side_effect=OSError("offline"))
+    def test_lookup_fails_open(self, _mock):
+        from lutris.util.gog_offline import lookup_lutris_slug_for_gogid
+
+        self.assertIsNone(lookup_lutris_slug_for_gogid("1207664663"))
+
+
+class TestInstallerFileLocalPath(TestCase):
+    def test_local_path_overrides_dest_and_skips_cache(self):
+        from lutris.installer.installer_file import InstallerFile
+
+        installer_file = InstallerFile(
+            "game",
+            "gogsetup0",
+            {
+                "url": "N/A:Select the installer from GOG",
+                "filename": "setup_game.exe",
+                "local_path": "/data/setup_game.exe",
+            },
+        )
+        self.assertTrue(installer_file.is_dest_file_overridden)
+        self.assertEqual(installer_file.dest_file, "/data/setup_game.exe")
+        self.assertFalse(installer_file.allow_pga_cache)
+        self.assertEqual(installer_file.default_provider, "user")
+        copied = installer_file.copy()
+        self.assertTrue(copied.is_dest_file_overridden)
+        self.assertEqual(copied.dest_file, "/data/setup_game.exe")
+        self.assertFalse(copied.allow_pga_cache)
+
+    def test_na_without_local_path_is_not_overridden(self):
+        from lutris.installer.installer_file import InstallerFile
+
+        installer_file = InstallerFile(
+            "game",
+            "gogsetup0",
+            {
+                "url": "N/A:Select the installer from GOG",
+                "filename": "setup_game.exe",
+            },
+        )
+        self.assertFalse(installer_file.is_dest_file_overridden)

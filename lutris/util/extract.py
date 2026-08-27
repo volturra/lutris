@@ -262,6 +262,11 @@ def _decompress_gog(file_path: str, destination_path: str) -> None:
         raise RuntimeError("innoextract failed to extract GOG setup file")
 
 
+def get_innoextract_path() -> str:
+    """Return the path to the innoextract executable."""
+    return _get_innoextract_path()
+
+
 def _get_innoextract_path() -> str:
     """Return the path where innoextract is installed"""
     inno_dirs = [path for path in os.listdir(settings.RUNTIME_DIR) if path.startswith("innoextract")]

@@ -25,6 +25,10 @@ class InstallerFile:
         self.allow_pga_cache = True
         if isinstance(self._file_meta, dict):
             self._downloader = self._file_meta.get("downloader")
+            local_path = self._file_meta.get("local_path")
+            if local_path:
+                self.override_dest_file(os.path.expanduser(str(local_path)))
+                self.allow_pga_cache = False
         else:
             self._downloader = None
 

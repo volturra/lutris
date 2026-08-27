@@ -14,6 +14,12 @@ from lutris.gui.widgets.navigation_stack import NavigationStack
 from lutris.installer import AUTO_WIN32_EXE, get_installers
 from lutris.scanners import playtron as playtron_scanner
 from lutris.util import datapath
+from lutris.util.gog_offline import (
+    build_offline_installer,
+    is_archive_path,
+    lookup_lutris_slug_for_gogid,
+    resolve_gog_offline_packages,
+)
 from lutris.util.jobs import COMPLETED_IDLE_TASK, AsyncCall, schedule_at_idle
 from lutris.util.strings import gtk_safe, slugify
 from lutris.util.wine.proton import is_proton_version
@@ -34,8 +40,8 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         (
             "application-x-executable-symbolic",
             "go-next-symbolic",
-            _("Install a Windows game from an executable"),
-            _("Launch a Windows executable (.exe) installer"),
+            _("Install from a setup file"),
+            _("GOG offline installers, or a Windows executable"),
             "install_from_setup",
         ),
         (
@@ -137,6 +143,18 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
 
         self.install_script_file_chooser = FileChooserEntry(title=_("Select script"), action=Gtk.FileChooserAction.OPEN)
 
+        self.setup_file_chooser = FileChooserEntry(
+            title=_("Select setup file"), action=Gtk.FileChooserAction.OPEN
+        )
+        self.setup_packages_store = Gtk.ListStore(bool, str, str, object)
+        self.setup_packages_frame = None
+        self._setup_selected_path = ""
+        self._setup_scan_generation = 0
+        self._setup_name_user_edited = False
+        self._setup_updating_name = False
+        self._pending_setup_name = ""
+        self._pending_setup_selected = []
+
         self.import_rom_file_chooser = FileChooserEntry(
             title=_("Select ROMs"), action=Gtk.FileChooserAction.SELECT_FOLDER
         )
@@ -146,6 +164,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.stack.add_named_factory("initial", self.create_initial_page)
         self.stack.add_named_factory("search_installers", self.create_search_installers_page)
         self.stack.add_named_factory("install_from_setup", self.create_install_from_setup_page)
+        self.stack.add_named_factory("install_from_setup_options", self.create_install_from_setup_options_page)
         self.stack.add_named_factory("install_from_script", self.create_install_from_script_page)
         self.stack.add_named_factory("import_rom", self.create_import_rom_page)
         self.stack.add_named_factory("import_playtron", self.create_import_playtron_page)
@@ -303,6 +322,24 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.stack.navigate_to_page(self.present_install_from_setup_page)
 
     def create_install_from_setup_page(self):
+        grid = Gtk.Grid(row_spacing=6, column_spacing=6)
+        label = self._get_label(_("Setup file or folder"))
+        grid.attach(label, 0, 0, 1, 1)
+        grid.attach(self.setup_file_chooser, 1, 0, 1, 1)
+        self.setup_file_chooser.set_hexpand(True)
+
+        explanation = _(
+            "Select a GOG setup executable, any file inside a GOG installer folder, "
+            "or an archive of those files.\n\n"
+            "Lutris groups .bin volumes with their EXE and lists every stacked "
+            "installer it finds. You can uncheck extras and drag rows to change "
+            "install order.\n\n"
+            "A plain Windows .exe installer still works; you will be asked for a name."
+        )
+        grid.attach(self._get_explanation_label(explanation), 0, 1, 2, 1)
+        return grid
+
+    def create_install_from_setup_options_page(self):
         name_label = self._get_label(_("Game name"))
 
         self.install_from_setup_game_name_entry.set_hexpand(True)
@@ -310,26 +347,48 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
 
         grid = Gtk.Grid(row_spacing=6, column_spacing=6)
         grid.set_column_homogeneous(False)
-        grid.attach(name_label, 0, 0, 1, 1)
-        grid.attach(self.install_from_setup_game_name_entry, 1, 0, 1, 1)
-        grid.attach(self.install_from_setup_game_slug_checkbox, 0, 1, 1, 1)
-        grid.attach(self.install_from_setup_game_slug_entry, 1, 1, 1, 1)
+
+        self.setup_packages_frame = Gtk.Frame(label=_("Installers in this folder"), visible=True)
+        treeview = Gtk.TreeView(model=self.setup_packages_store, visible=True, headers_visible=False)
+        treeview.set_reorderable(True)
+        treeview.set_tooltip_text(_("Drag rows to change the install order"))
+
+        toggle = Gtk.CellRendererToggle()
+        toggle.connect("toggled", self.on_setup_package_toggled)
+        toggle_column = Gtk.TreeViewColumn(None, toggle, active=0)
+        treeview.append_column(toggle_column)
+
+        text = Gtk.CellRendererText()
+        label_column = Gtk.TreeViewColumn(None, text)
+        label_column.set_cell_data_func(text, self._setup_package_cell_data)
+        treeview.append_column(label_column)
+
+        scroll = Gtk.ScrolledWindow(visible=True)
+        scroll.set_min_content_height(160)
+        scroll.set_vexpand(True)
+        scroll.add(treeview)
+        self.setup_packages_frame.add(scroll)
+        grid.attach(self.setup_packages_frame, 0, 0, 2, 1)
+
+        grid.attach(name_label, 0, 1, 1, 1)
+        grid.attach(self.install_from_setup_game_name_entry, 1, 1, 1, 1)
+        grid.attach(self.install_from_setup_game_slug_checkbox, 0, 2, 1, 1)
+        grid.attach(self.install_from_setup_game_slug_entry, 1, 2, 1, 1)
 
         self.install_from_setup_game_name_entry.connect("changed", self.on_install_from_setup_game_name_changed)
         self.install_from_setup_game_slug_checkbox.connect("toggled", self.on_install_from_setup_game_slug_toggled)
+        self.setup_packages_store.connect("row-inserted", self.on_setup_packages_reordered)
+        self.setup_packages_store.connect("row-deleted", self.on_setup_packages_reordered)
 
         explanation = _(
-            "Enter the name of the game you will install.\n\nWhen you click 'Install' below, "
-            "the installer window will appear and guide you through a simple installation.\n\n"
-            "It will prompt you for a setup executable, and will use Wine to install it.\n\n"
-            "If you know the Lutris identifier for the game, you can provide it for improved "
-            "Lutris integration, such as Lutris provided banners."
+            "The first checked installer supplies the game name and creates the prefix. "
+            "Anything below it is installed into that same game.\n\n"
+            "If you know the Lutris identifier, provide it for banners and covers."
         )
-
-        grid.attach(self._get_explanation_label(explanation), 0, 2, 2, 1)
+        grid.attach(self._get_explanation_label(explanation), 0, 3, 2, 1)
 
         preset_label = Gtk.Label(_("Installer preset:"), visible=True)
-        grid.attach(preset_label, 0, 3, 1, 1)
+        grid.attach(preset_label, 0, 4, 1, 1)
 
         self.installer_presets.append(["win11", _("Windows 11 64-bit")])
         self.installer_presets.append(["win10", _("Windows 10 64-bit (Default)")])
@@ -346,12 +405,12 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.install_preset_dropdown.set_id_column(0)
         self.install_preset_dropdown.set_active_id("win10")
 
-        grid.attach(self.install_preset_dropdown, 1, 3, 1, 1)
+        grid.attach(self.install_preset_dropdown, 1, 4, 1, 1)
         self.install_preset_dropdown.set_halign(Gtk.Align.START)
 
         locale_label = Gtk.Label(_("Locale:"), visible=True)
         locale_label.set_xalign(0)
-        grid.attach(locale_label, 0, 4, 1, 1)
+        grid.attach(locale_label, 0, 5, 1, 1)
 
         locale_list = sysoptions.get_locale_choices()
         for locale_humanized, locale in locale_list:
@@ -363,19 +422,39 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.install_locale_dropdown.set_id_column(0)
         self.install_locale_dropdown.set_active(0)
 
-        grid.attach(self.install_locale_dropdown, 1, 4, 1, 1)
+        grid.attach(self.install_locale_dropdown, 1, 5, 1, 1)
         self.install_locale_dropdown.set_halign(Gtk.Align.START)
 
         grid.set_vexpand(True)
         return grid
+
+    @staticmethod
+    def _setup_package_cell_data(_column, cell, model, tree_iter, _data=None):
+        title = model[tree_iter][1]
+        subtitle = model[tree_iter][2]
+        cell.set_property(
+            "markup",
+            "<b>%s</b>\n<small>%s</small>" % (gtk_safe(title), gtk_safe(subtitle)),
+        )
 
     def on_install_from_setup_game_slug_entry_focus_out(self, *args):
         slug = slugify(self.install_from_setup_game_slug_entry.get_text())
         self.install_from_setup_game_slug_entry.set_text(slug)
 
     def present_install_from_setup_page(self):
+        self._setup_scan_generation += 1
+        self.continue_button.set_sensitive(True)
         self.set_page_title_markup(_("<b>Select setup file</b>"))
         self.stack.present_page("install_from_setup")
+        self.display_continue_button(self._on_setup_file_continue, label=_("_Continue"))
+
+    def present_install_from_setup_options_page(self):
+        self.set_page_title_markup(_("<b>Install from setup file</b>"))
+        self.stack.present_page("install_from_setup_options")
+        has_packages = len(self.setup_packages_store) > 0
+        if self.setup_packages_frame:
+            self.setup_packages_frame.set_visible(has_packages)
+        self._maybe_fill_name_from_packages()
         self.display_continue_button(self._on_install_setup_continue, label=_("_Install"))
 
     def on_install_from_setup_game_slug_toggled(self, checkbutton):
@@ -383,50 +462,184 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.on_install_from_setup_game_name_changed()
 
     def on_install_from_setup_game_name_changed(self, *_args):
+        if not self._setup_updating_name:
+            self._setup_name_user_edited = True
         if not self.install_from_setup_game_slug_checkbox.get_active():
             name = self.install_from_setup_game_name_entry.get_text()
             proposed_slug = slugify(name) if name else ""
             self.install_from_setup_game_slug_entry.set_text(proposed_slug)
 
-    def _on_install_setup_continue(self, button):
-        name = self.install_from_setup_game_name_entry.get_text().strip()
+    def on_setup_package_toggled(self, _renderer, path):
+        self.setup_packages_store[path][0] = not self.setup_packages_store[path][0]
+        self._maybe_fill_name_from_packages()
 
+    def on_setup_packages_reordered(self, *_args):
+        self._maybe_fill_name_from_packages()
+
+    def _first_checked_setup_package(self):
+        for row in self.setup_packages_store:
+            if row[0] and row[3]:
+                return row[3]
+        return None
+
+    def _checked_setup_packages(self):
+        return [row[3] for row in self.setup_packages_store if row[0] and row[3]]
+
+    def _maybe_fill_name_from_packages(self):
+        if self._setup_name_user_edited:
+            return
+        package = self._first_checked_setup_package()
+        if not package:
+            return
+        self._setup_updating_name = True
+        try:
+            self.install_from_setup_game_name_entry.set_text(package.title)
+            self.on_install_from_setup_game_name_changed()
+        finally:
+            self._setup_updating_name = False
+            self._setup_name_user_edited = False
+
+    def _load_setup_packages(self, packages):
+        self.setup_packages_store.clear()
+        self._setup_name_user_edited = False
+        default_kind = packages[0].kind if packages else None
+        for package in packages:
+            checked = package.kind == default_kind
+            self.setup_packages_store.append([checked, package.title, package.subtitle, package])
+        self._maybe_fill_name_from_packages()
+
+    def _on_setup_file_continue(self, _button):
+        path = os.path.expanduser(self.setup_file_chooser.get_path() or "").strip()
+        if not path:
+            ErrorDialog(_("You must select a setup file or folder."), parent=self)
+            return
+        if not os.path.exists(path):
+            ErrorDialog(_("No file exists at '%s'.") % path, parent=self)
+            return
+        self._setup_scan_generation += 1
+        generation = self._setup_scan_generation
+        self._setup_selected_path = path
+        self.continue_button.set_sensitive(False)
+        self.set_page_title_markup(_("<b>Scanning installers…</b>"))
+
+        def on_scanned(packages, error):
+            self._on_setup_packages_scanned(generation, packages, error)
+
+        AsyncCall(resolve_gog_offline_packages, on_scanned, path, callback_target=self)
+
+    def _on_setup_packages_scanned(self, generation, packages, error):
+        if generation != self._setup_scan_generation:
+            return
+        self.continue_button.set_sensitive(True)
+        if error:
+            ErrorDialog(str(error), parent=self)
+            self.present_install_from_setup_page()
+            return
+        packages = packages or []
+        path = self._setup_selected_path
+        if not packages and (os.path.isdir(path) or is_archive_path(path)):
+            ErrorDialog(_("No GOG installers were found in that folder."), parent=self)
+            self.present_install_from_setup_page()
+            return
+        if not packages and not os.path.isfile(path):
+            ErrorDialog(_("You must select a setup file or folder."), parent=self)
+            self.present_install_from_setup_page()
+            return
+        self._load_setup_packages(packages)
+        self.stack.navigate_to_page(self.present_install_from_setup_options_page)
+
+    def _on_install_setup_continue(self, _button):
+        name = self.install_from_setup_game_name_entry.get_text().strip()
+        selected = self._checked_setup_packages()
+
+        if not selected and len(self.setup_packages_store) > 0:
+            ErrorDialog(_("Select at least one installer."), parent=self)
+            return
         if not name:
             ErrorDialog(_("You must provide a name for the game you are installing."), parent=self)
+            return
+        if selected and len({package.kind for package in selected}) > 1:
+            ErrorDialog(
+                _("Linux and Windows installers can't be combined. Uncheck one set."),
+                parent=self,
+            )
             return
 
         if self.install_from_setup_game_slug_checkbox.get_active():
             game_slug = slugify(self.install_from_setup_game_slug_entry.get_text())
-        else:
-            game_slug = slugify(name)
+            self._launch_setup_installer(name, game_slug, selected)
+            return
 
+        gogid = selected[0].gogid if selected else None
+        if gogid:
+            self._pending_setup_name = name
+            self._pending_setup_selected = selected
+            self.continue_button.set_sensitive(False)
+            AsyncCall(lookup_lutris_slug_for_gogid, self._on_lutris_slug_lookup, gogid)
+            return
+
+        self._launch_setup_installer(name, slugify(name), selected)
+
+    def _on_lutris_slug_lookup(self, lutris_slug, error):
+        self.continue_button.set_sensitive(True)
+        name = self._pending_setup_name
+        selected = self._pending_setup_selected
+        if error:
+            lutris_slug = None
+        game_slug = lutris_slug or slugify(name)
+        self._launch_setup_installer(name, game_slug, selected)
+
+    def _launch_setup_installer(self, name, game_slug, selected):
         installer_preset = self.installer_presets[self.install_preset_dropdown.get_active()][0]
         arch = "win32" if installer_preset.startswith(("win98", "winxp")) else "win64"
         win_ver = installer_preset.split("-")[0]
-        if win_ver != "win10":
-            win_ver_task = {"task": {"name": "winetricks", "app": win_ver, "arch": arch}}
-        else:
-            win_ver_task = None
-
         locale_selected = self.installer_locale[self.install_locale_dropdown.get_active()][0]
 
-        installer = {
-            "name": name,
-            "version": _("Setup file"),
-            "slug": game_slug + "-setup",
-            "game_slug": game_slug,
-            "runner": "wine",
-            "script": {
-                "game": {"exe": AUTO_WIN32_EXE, "prefix": "$GAMEDIR"},
-                "files": [{"setupfile": "N/A:%s" % _("Select the setup file")}],
-                "installer": [{"task": {"name": "wineexec", "executable": "setupfile", "arch": arch}}],
-                "system": {"env": {"LC_ALL": locale_selected}},
-            },
-        }
-        if win_ver_task:
-            installer["script"]["installer"].insert(0, win_ver_task)
+        if selected:
+            installer = build_offline_installer(
+                selected,
+                name=name,
+                game_slug=game_slug,
+                wine_arch=arch,
+                locale=locale_selected,
+                win_ver=win_ver if win_ver != "win10" else None,
+            )
+        else:
+            setup_path = self._setup_selected_path
+            installer = {
+                "name": name,
+                "version": _("Setup file"),
+                "slug": game_slug + "-setup",
+                "game_slug": game_slug,
+                "runner": "wine",
+                "script": {
+                    "game": {"exe": AUTO_WIN32_EXE, "prefix": "$GAMEDIR"},
+                    "files": [
+                        {
+                            "setupfile": {
+                                "url": "N/A:%s" % _("Select the setup file"),
+                                "filename": os.path.basename(setup_path),
+                                "local_path": setup_path,
+                            }
+                        }
+                    ],
+                    "installer": [{"task": {"name": "wineexec", "executable": "setupfile", "arch": arch}}],
+                    "system": {"env": {"LC_ALL": locale_selected}},
+                },
+            }
+            if win_ver != "win10":
+                installer["script"]["installer"].insert(
+                    0, {"task": {"name": "winetricks", "app": win_ver, "arch": arch}}
+                )
+
         application = Gio.Application.get_default()
-        application.show_installer_window([installer])
+        service = None
+        appid = installer.get("gogid")
+        if appid:
+            from lutris.services.gog import GOGService
+
+            service = GOGService()
+        application.show_installer_window([installer], service=service, appid=appid)
         self.destroy()
 
     # Install from Script Page
