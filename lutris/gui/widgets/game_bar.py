@@ -143,7 +143,10 @@ class GameBar(Gtk.Box):
         if text == "-":
             return Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL, visible=True)
 
-        button = Gtk.ModelButton(text, visible=True, xalign=0.0)
+        # ModelButton captions go on "text"; a positional arg is Gtk.Button:label,
+        # which destroys and rebuilds the child widget.
+        button = Gtk.ModelButton(visible=True, xalign=0.0)
+        button.props.text = text
         if callback:
             button.connect("clicked", self.on_link_button_clicked, callback)
         return button

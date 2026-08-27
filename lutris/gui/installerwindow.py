@@ -195,7 +195,8 @@ class InstallerWindow(ModelessDialog, DialogInstallUIDelegate, ScriptInterpreter
 
     def add_menu_button(self, label, handler=None, tooltip=None, sensitive=True):
         """Add a button to the menu in the header bar"""
-        button = Gtk.ModelButton(label, visible=True, xalign=0.0)
+        button = Gtk.ModelButton(visible=True, xalign=0.0)
+        button.props.text = label  # not Gtk.Button:label; that rebuilds the child
         button.set_sensitive(sensitive)
         button.set_no_show_all(True)
         if tooltip:

@@ -1370,12 +1370,13 @@ class LutrisWindow(Gtk.ApplicationWindow, DialogLaunchUIDelegate, DialogInstallU
 
         if row_type != "category" or row_id != ".hidden":
             self.sidebar.hidden_row.hide()
-            self.show_hidden_games_button.set_label(_("Show Hidden Games"))
+            hidden_games_label = _("Show _Hidden Games")
         else:
-            self.show_hidden_games_button.set_label(_("Rehide Hidden Games"))
-        # We just _replaced_ the label, need to align it. That is weird and
-        # contrary to the docs, but here we are.
-        self.show_hidden_games_button.get_child().set_halign(Gtk.Align.START)
+            hidden_games_label = _("Rehide Hidden Games")
+        # Gtk.ModelButton stores its caption on the "text" property, which
+        # updates the existing Gtk.Label. Gtk.Button.set_label() instead
+        # destroys and rebuilds the child widget tree.
+        self.show_hidden_games_button.props.text = hidden_games_label
 
         if not MISSING_GAMES.is_initialized or (row_type == "dynamic_category" and row_id == "missing"):
             MISSING_GAMES.update_all_missing()
