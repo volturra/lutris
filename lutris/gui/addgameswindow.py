@@ -507,7 +507,16 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         for package in packages:
             checked = package.kind == default_kind
             self.setup_packages_store.append([checked, package.title, package.subtitle, package])
-        self._maybe_fill_name_from_packages()
+        if packages:
+            self._maybe_fill_name_from_packages()
+            return
+        self._setup_updating_name = True
+        try:
+            self.install_from_setup_game_name_entry.set_text("")
+            self.on_install_from_setup_game_name_changed()
+        finally:
+            self._setup_updating_name = False
+            self._setup_name_user_edited = False
 
     def _on_setup_file_continue(self, _button):
         path = os.path.expanduser(self.setup_file_chooser.get_path() or "").strip()

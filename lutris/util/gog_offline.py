@@ -366,9 +366,9 @@ def resolve_gog_offline_packages(path: str, inspect_fn: InspectFn | None = None)
         return scan_gog_offline_directory(path, inspect_fn=inspect_fn)
     if is_archive_path(path):
         extracted = _extract_archive_to_cache(path)
-        if extracted:
-            return scan_gog_offline_directory(extracted, inspect_fn=inspect_fn)
-        return []
+        if not extracted:
+            raise RuntimeError(_("Unable to extract the archive '%s'.") % os.path.basename(path))
+        return scan_gog_offline_directory(extracted, inspect_fn=inspect_fn)
     return scan_gog_offline_directory(os.path.dirname(path), preferred_path=path, inspect_fn=inspect_fn)
 
 

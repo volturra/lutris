@@ -242,8 +242,9 @@ class TestArchiveCache(TestCase):
             cache_root = os.path.join(tmp, "cache")
             with patch("lutris.settings.CACHE_DIR", cache_root):
                 with patch("lutris.util.extract.extract_archive", side_effect=RuntimeError("boom")):
-                    packages = resolve_gog_offline_packages(archive)
-            self.assertEqual(packages, [])
+                    with self.assertRaises(RuntimeError) as raised:
+                        resolve_gog_offline_packages(archive)
+            self.assertIn("Unable to extract", str(raised.exception))
             cache_dir = os.path.join(cache_root, "gog-offline")
             if os.path.isdir(cache_dir):
                 self.assertEqual(os.listdir(cache_dir), [])
