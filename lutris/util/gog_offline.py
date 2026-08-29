@@ -34,6 +34,14 @@ InspectFn = Callable[[str], tuple[str | None, str | None]]
 
 
 @dataclass
+class GogOfflineScan:
+    """Result of scanning a setup file, folder, or archive."""
+
+    packages: list["GogOfflinePackage"] = field(default_factory=list)
+    suggested_title: str = ""
+
+
+@dataclass
 class GogOfflinePackage:
     """One installable GOG offline installer (an EXE or Linux .sh, plus volumes)."""
 
@@ -81,8 +89,10 @@ def is_archive_path(path: str) -> bool:
 
 
 def is_generic_windows_setup(path: str) -> bool:
-    """True if path is a Windows .exe usable as a fallback wineexec installer."""
-    return bool(path) and os.path.isfile(path) and path.lower().endswith(".exe")
+    """True if path is a Windows .exe or .msi usable as a fallback wineexec installer."""
+    if not path or not os.path.isfile(path):
+        return False
+    return os.path.splitext(path)[1].lower() in {".exe", ".msi"}
 
 
 def bin_volume_stem(filename: str) -> str | None:
@@ -262,6 +272,22 @@ def suggest_package_order(
     return ordered
 
 
+def suggested_setup_title(path: str, inspect_fn: InspectFn | None = None) -> str:
+    """Return an Inno Setup display name from installer metadata, if any.
+
+    innoextract reports Inspecting "Title" for any Inno installer, GOG or not.
+    An empty string means there was no reliable metadata (NSIS, MSI, missing
+    innoextract). Filename guesses are not used here.
+    """
+    if not path or not os.path.isfile(path):
+        return ""
+    if os.path.splitext(path)[1].lower() != ".exe":
+        return ""
+    inspect_fn = inspect_fn or inspect_innoextract
+    title, _gogid = inspect_fn(path)
+    return (title or "").strip()
+
+
 def inspect_innoextract(path: str) -> tuple[str | None, str | None]:
     """Run innoextract -i and parse title / GOG product id. Fail-open."""
     import subprocess
@@ -292,24 +318,37 @@ def inspect_innoextract(path: str) -> tuple[str | None, str | None]:
     return parse_innoextract_info(text)
 
 
-def _enrich_package(package: GogOfflinePackage, inspect_fn: InspectFn) -> None:
+def _enrich_package(package: GogOfflinePackage, inspect_fn: InspectFn) -> tuple[str | None, str | None]:
+    """Apply innoextract metadata. Returns the raw (title, gogid), not filename guesses."""
     if package.kind != "windows":
-        return
+        return None, None
     title, gogid = inspect_fn(package.exe_path)
     if title:
         package.title = title
     if gogid:
         package.gogid = gogid
+    return title, gogid
+
+
+def _is_gog_offline_package(package: GogOfflinePackage) -> bool:
+    """True if this is a real GOG offline installer, not a generic Inno/NSIS setup.
+
+    A setup_/patch_ filename is not enough: non-GOG Inno often uses those names
+    and must be installed with wineexec, not autosetup_gog_game.
+    """
+    if package.kind == "linux":
+        return True
+    return bool(package.gogid or package.bin_paths)
 
 
 def scan_gog_offline_directory(
     directory: str,
     preferred_path: str | None = None,
     inspect_fn: InspectFn | None = None,
-) -> list[GogOfflinePackage]:
+) -> GogOfflineScan:
     """Scan a folder for GOG offline installers and return ordered packages."""
     if not directory or not os.path.isdir(directory):
-        return []
+        return GogOfflineScan()
 
     inspect_fn = inspect_fn or inspect_innoextract
     candidates: list[str] = []
@@ -319,7 +358,7 @@ def scan_gog_offline_directory(
         names = os.listdir(directory)
     except OSError as ex:
         logger.warning("Unable to list GOG offline folder %s: %s", directory, ex)
-        return []
+        return GogOfflineScan()
 
     for name in names:
         path = os.path.join(directory, name)
@@ -337,31 +376,43 @@ def scan_gog_offline_directory(
         candidates.append(preferred_abs)
 
     packages = group_gog_files(candidates)
-    # Drop non-GOG preferred EXEs that sneaked in without setup_/patch_ naming
-    # unless innoextract reports a GOG id or the user picked that file as a
-    # lone installer (handled by the caller when the list is empty).
     kept: list[GogOfflinePackage] = []
+    preferred_package: GogOfflinePackage | None = None
+    preferred_inspect_title = ""
     for package in packages:
+        is_preferred = preferred_abs and os.path.abspath(package.exe_path) == preferred_abs
         name = package.filename.lower()
+        if is_preferred:
+            preferred_package = package
         if package.kind == "linux":
             kept.append(package)
             continue
-        if name.startswith("setup_") or name.startswith("patch_"):
-            _enrich_package(package, inspect_fn)
+        if name.startswith("setup_") or name.startswith("patch_") or is_preferred:
+            title, _gogid = _enrich_package(package, inspect_fn)
+            if is_preferred and title:
+                preferred_inspect_title = title.strip()
+        if _is_gog_offline_package(package):
             kept.append(package)
-            continue
-        if preferred_abs and os.path.abspath(package.exe_path) == preferred_abs:
-            _enrich_package(package, inspect_fn)
-            if package.gogid or _SETUP_EXE_RE.match(package.filename):
-                kept.append(package)
-    return suggest_package_order(kept, preferred_path=preferred_path)
+
+    # Opening a generic Windows setup next to GOG files must not install the siblings.
+    if (
+        preferred_abs
+        and os.path.isfile(preferred_abs)
+        and not (preferred_package and _is_gog_offline_package(preferred_package))
+        and is_generic_windows_setup(preferred_abs)
+    ):
+        return GogOfflineScan(packages=[], suggested_title=preferred_inspect_title)
+
+    ordered = suggest_package_order(kept, preferred_path=preferred_path)
+    suggested_title = ordered[0].title if ordered else preferred_inspect_title
+    return GogOfflineScan(packages=ordered, suggested_title=suggested_title)
 
 
-def resolve_gog_offline_packages(path: str, inspect_fn: InspectFn | None = None) -> list[GogOfflinePackage]:
+def resolve_gog_offline_packages(path: str, inspect_fn: InspectFn | None = None) -> GogOfflineScan:
     """Scan a file, folder, or archive path for GOG offline packages."""
     path = os.path.expanduser(path)
     if not path or not os.path.exists(path):
-        return []
+        return GogOfflineScan()
     if os.path.isdir(path):
         return scan_gog_offline_directory(path, inspect_fn=inspect_fn)
     if is_archive_path(path):

@@ -15,6 +15,7 @@ from lutris.util.gog_offline import (
     resolve_gog_offline_packages,
     scan_gog_offline_directory,
     suggest_package_order,
+    suggested_setup_title,
     title_from_filename,
 )
 
@@ -49,6 +50,12 @@ class TestParseInnoextractInfo(TestCase):
     def test_empty_output(self):
         self.assertEqual(parse_innoextract_info(""), (None, None))
 
+    def test_inno_title_without_gog_id(self):
+        output = 'Inspecting "Example App" - setup data version 5.4.2 (unicode)\nNo GOG.com game ID found!\n'
+        title, gogid = parse_innoextract_info(output)
+        self.assertEqual(title, "Example App")
+        self.assertIsNone(gogid)
+
 
 class TestFilenameHelpers(TestCase):
     def test_bin_volume_stem(self):
@@ -74,15 +81,18 @@ class TestFilenameHelpers(TestCase):
     def test_title_from_filename(self):
         self.assertEqual(title_from_filename("setup_stellaris_3.8_(1).exe"), "Stellaris")
 
-    def test_generic_windows_setup_is_exe_only(self):
+    def test_generic_windows_setup_accepts_exe_and_msi(self):
         with TemporaryDirectory() as tmp:
             exe = os.path.join(tmp, "setup.exe")
+            msi = os.path.join(tmp, "setup.msi")
             volume = os.path.join(tmp, "setup-1.bin")
             script = os.path.join(tmp, "game.sh")
             _touch(exe)
+            _touch(msi)
             _touch(volume)
             _touch(script)
             self.assertTrue(is_generic_windows_setup(exe))
+            self.assertTrue(is_generic_windows_setup(msi))
             self.assertFalse(is_generic_windows_setup(volume))
             self.assertFalse(is_generic_windows_setup(script))
             self.assertFalse(is_generic_windows_setup(tmp))
@@ -177,7 +187,8 @@ class TestScanDirectory(TestCase):
                     return "Cool Game", "111"
                 return "Cool Game DLC", "222"
 
-            packages = scan_gog_offline_directory(tmp, inspect_fn=inspect)
+            scan = scan_gog_offline_directory(tmp, inspect_fn=inspect)
+            packages = scan.packages
             self.assertEqual(len(packages), 2)
             self.assertEqual(packages[0].title, "Cool Game")
             self.assertEqual(packages[0].gogid, "111")
@@ -198,16 +209,84 @@ class TestResolvePath(TestCase):
                     return "Cool Game", "111"
                 return "Cool Game DLC", "222"
 
-            packages = resolve_gog_offline_packages(exe, inspect_fn=inspect)
-            self.assertEqual(len(packages), 2)
-            self.assertEqual(packages[0].filename, "setup_game_1.0_(1).exe")
+            scan = resolve_gog_offline_packages(exe, inspect_fn=inspect)
+            self.assertEqual(len(scan.packages), 2)
+            self.assertEqual(scan.packages[0].filename, "setup_game_1.0_(1).exe")
 
     def test_non_gog_exe_is_omitted_without_gog_id(self):
         with TemporaryDirectory() as tmp:
             exe = os.path.join(tmp, "SomeInstaller.exe")
             _touch(exe)
-            packages = scan_gog_offline_directory(tmp, preferred_path=exe, inspect_fn=lambda _path: (None, None))
-            self.assertEqual(packages, [])
+            scan = scan_gog_offline_directory(tmp, preferred_path=exe, inspect_fn=lambda _path: (None, None))
+            self.assertEqual(scan.packages, [])
+            self.assertEqual(scan.suggested_title, "")
+
+    def test_non_gog_inno_title_is_omitted_from_packages(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "Example App 2_1.2.3_Setup.exe")
+            _touch(exe)
+            scan = scan_gog_offline_directory(
+                tmp, preferred_path=exe, inspect_fn=lambda _path: ("Example App", None)
+            )
+            self.assertEqual(scan.packages, [])
+            self.assertEqual(scan.suggested_title, "Example App")
+
+    def test_setup_filename_without_gog_id_or_bins_is_generic(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "setup_MyApp.exe")
+            _touch(exe)
+            scan = scan_gog_offline_directory(
+                tmp, preferred_path=exe, inspect_fn=lambda _path: ("My App", None)
+            )
+            self.assertEqual(scan.packages, [])
+            self.assertEqual(scan.suggested_title, "My App")
+
+    def test_setup_with_bins_kept_without_gog_id(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "setup_game_1.0_(1).exe")
+            _touch(exe)
+            _touch(os.path.join(tmp, "setup_game_1.0_(1)-1.bin"))
+            scan = scan_gog_offline_directory(tmp, inspect_fn=lambda _path: ("Cool Game", None))
+            self.assertEqual(len(scan.packages), 1)
+            self.assertEqual(scan.packages[0].title, "Cool Game")
+            self.assertIsNone(scan.packages[0].gogid)
+
+    def test_preferred_generic_ignores_sibling_gog_packages(self):
+        with TemporaryDirectory() as tmp:
+            generic = os.path.join(tmp, "Example App 2_1.2.3_Setup.exe")
+            gog = os.path.join(tmp, "setup_game_1.0_(1).exe")
+            _touch(generic)
+            _touch(gog)
+
+            def inspect(path):
+                if path.endswith("Example App 2_1.2.3_Setup.exe"):
+                    return "Example App", None
+                return "Cool Game", "111"
+
+            scan = scan_gog_offline_directory(tmp, preferred_path=generic, inspect_fn=inspect)
+            self.assertEqual(scan.packages, [])
+            self.assertEqual(scan.suggested_title, "Example App")
+
+
+class TestSuggestedSetupTitle(TestCase):
+    def test_uses_innoextract_title_without_gog_id(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "Example App 2_1.2.3_Setup.exe")
+            _touch(exe)
+            self.assertEqual(suggested_setup_title(exe, inspect_fn=lambda _path: ("Example App", None)), "Example App")
+
+    def test_empty_when_inspect_finds_nothing(self):
+        with TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "setup.exe")
+            _touch(exe)
+            self.assertEqual(suggested_setup_title(exe, inspect_fn=lambda _path: (None, None)), "")
+
+    def test_ignores_non_exe(self):
+        with TemporaryDirectory() as tmp:
+            msi = os.path.join(tmp, "setup.msi")
+            _touch(msi)
+            self.assertEqual(suggested_setup_title(msi, inspect_fn=lambda _path: ("Nope", None)), "")
+            self.assertEqual(suggested_setup_title(tmp), "")
 
 
 class TestArchiveCache(TestCase):
@@ -228,8 +307,8 @@ class TestArchiveCache(TestCase):
                     first = resolve_gog_offline_packages(archive, inspect_fn=lambda _path: ("Game", "1"))
                     second = resolve_gog_offline_packages(archive, inspect_fn=lambda _path: ("Game", "1"))
 
-            self.assertEqual(len(first), 1)
-            self.assertEqual(first[0].exe_path, second[0].exe_path)
+            self.assertEqual(len(first.packages), 1)
+            self.assertEqual(first.packages[0].exe_path, second.packages[0].exe_path)
             self.assertEqual(extract.call_count, 1)
             self.assertTrue(os.path.isfile(os.path.join(stale, "junk.bin")))
             cached = os.listdir(os.path.join(cache_root, "gog-offline"))
