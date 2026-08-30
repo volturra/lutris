@@ -36,6 +36,8 @@ from lutris.database import games as games_db
 from lutris.database.services import ServiceGameCollection
 from lutris.exception_backstops import init_exception_backstops
 from lutris.game import GAME_START, GAME_STOPPED, Game, export_game, import_game
+from lutris.gui.addgameswindow import AddGamesWindow
+from lutris.gui.config.add_game_dialog import AddGameDialog
 from lutris.gui.dialogs import ErrorDialog, InstallOrPlayDialog, NoticeDialog, display_error
 from lutris.gui.dialogs.delegates import CommandLineUIDelegate, InstallUIDelegate, LaunchUIDelegate
 from lutris.gui.dialogs.issue import IssueReportWindow
@@ -50,6 +52,15 @@ from lutris.services import get_enabled_services
 from lutris.startup import init_lutris, run_all_checks
 from lutris.style_manager import StyleManager
 from lutris.util import datapath, log, resources, system
+from lutris.util.windows_executable import (
+    KIND_INSTALLER,
+    classify_windows_executable,
+    find_installed_game_for_path,
+    first_local_path_from_args,
+    is_lutris_installer_script,
+    is_windows_executable,
+    suggested_game_name,
+)
 from lutris.util.http import HTTPError, Request
 from lutris.util.log import file_handler, logger
 from lutris.util.savesync import save_check, show_save_stats, upload_save
@@ -127,7 +138,8 @@ class LutrisApplication(Gtk.Application):
                     "If several games share the same identifier you can use the numerical ID "
                     "(displayed when running lutris --list-games) and add "
                     "lutris:rungameid/numerical-id.\n"
-                    "To install a game, add lutris:install/game-identifier."
+                    "To install a game, add lutris:install/game-identifier.\n"
+                    "A Windows .exe opens the add-game flow, or launches the game if it is already in the library."
                 )
             )
         else:
@@ -332,7 +344,7 @@ class LutrisApplication(Gtk.Application):
             0,
             GLib.OptionFlags.NONE,
             GLib.OptionArg.STRING_ARRAY,
-            _("URI to open"),
+            _("URI or file to open"),
             "URI",
         )
 
@@ -362,10 +374,15 @@ class LutrisApplication(Gtk.Application):
             self.window.start_runtime_updates(self.force_updates)
 
     def get_window_key(self, **kwargs: Any) -> str:
+        if kwargs.get("exe"):
+            return str(kwargs["exe"])
+        if kwargs.get("setup_file"):
+            return str(kwargs["setup_file"])
         if kwargs.get("appid"):
             return str(kwargs["appid"])
-        if kwargs.get("runner"):
-            return str(kwargs["runner"].name)
+        runner = kwargs.get("runner")
+        if runner:
+            return str(getattr(runner, "name", runner))
         if kwargs.get("installers"):
             installer: dict[str, Any] = kwargs["installers"][0]
             return installer.get("slug") or installer.get("game_slug") or "Malformed script"
@@ -647,6 +664,27 @@ class LutrisApplication(Gtk.Application):
             return 0
 
         url = options.lookup_value(GLib.OPTION_REMAINING)
+        remaining = url.get_strv() if url else []
+        argv = list(command_line.get_arguments() or [])
+        # --install / -i already owns its path (YAML script or URL). Do not
+        # steal that argument as a leftover file to open.
+        local_path = None
+        if not options.contains("install"):
+            local_path = first_local_path_from_args([*remaining, *argv], command_line.get_cwd())
+        if local_path:
+            logger.info("Opening local file %s", local_path)
+            # Keep the client up: Dialog.run() during do_command_line never
+            # maps a window, and GApplication then exits as if we were idle.
+            self.quit_on_game_exit = False
+            self.set_tray_icon()
+            self.activate()
+            if self.window:
+                self.launch_ui_delegate = self.window
+                self.install_ui_delegate = self.window
+                self.window.present()
+            GLib.idle_add(self._open_local_path_idle, local_path)
+            return 0
+
         try:
             installer_info = self.get_lutris_action(url)
         except ValueError:
@@ -886,6 +924,73 @@ class LutrisApplication(Gtk.Application):
                 return game
 
         return Game(game_id)
+
+    def _open_local_path_idle(self, path: str) -> bool:
+        try:
+            self.open_local_path(path)
+        except Exception:
+            logger.exception("Failed to open %s", path)
+            ErrorDialog(_("Unable to open %s") % path, parent=self.window)
+        return False
+
+    def open_local_path(self, path: str) -> None:
+        """Handle a leftover filesystem path from a file manager or CLI."""
+        if not os.path.exists(path):
+            logger.error("No such file: %s", path)
+            ErrorDialog(_("No such file: %s") % path, parent=self.window)
+            return
+
+        if is_lutris_installer_script(path):
+            installers = get_installers(installer_file=path)
+            if installers:
+                self.show_installer_window(installers)
+            else:
+                ErrorDialog(_("No installer available."), parent=self.window)
+            return
+
+        db_game = find_installed_game_for_path(path)
+        if db_game and db_game.get("installed") and db_game.get("id"):
+            logger.info("Launching library game %s for %s", db_game.get("name"), path)
+            self._launch_db_game(db_game)
+            return
+
+        if os.path.isdir(path) or is_windows_executable(path):
+            self._open_windows_path(path)
+            return
+
+        logger.error("%s is not a Windows executable or Lutris script", path)
+        ErrorDialog(_("%s is not a valid URI") % path, parent=self.window)
+
+    def _launch_db_game(self, db_game: "DbGameDict") -> None:
+        def on_error(error: BaseException) -> None:
+            logger.exception("Unable to launch game: %s", error)
+
+        game = Game(str(db_game["id"]))
+        game.game_error.register(on_error)
+        game.launch(self.launch_ui_delegate)
+        if game.state == game.STATE_STOPPED and self.window:
+            self.window.present()
+
+    def _open_windows_path(self, path: str) -> None:
+        kind = classify_windows_executable(path)
+        logger.info("Classified %s as %s", path, kind)
+        if kind == KIND_INSTALLER:
+            self.show_window(AddGamesWindow, setup_file=path, parent=self.window)
+            return
+        self._open_as_local_wine_game(path)
+
+    def _open_as_local_wine_game(self, path: str) -> None:
+        from lutris.util.wine.prefix import find_prefix
+
+        exe = path if os.path.isfile(path) else ""
+        prefix = find_prefix(exe or path)
+        self.show_window(
+            AddGameDialog,
+            runner="wine",
+            exe=exe or None,
+            prefix=prefix,
+            name=suggested_game_name(path),
+        )
 
     @staticmethod
     def get_lutris_action(url: GLib.Variant | None) -> "InstallerInfoDict | dict[str, None]":

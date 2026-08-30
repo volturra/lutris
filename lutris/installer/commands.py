@@ -23,6 +23,7 @@ from lutris.util.gog import apply_gog_config, find_gog_config_dir
 from lutris.util.gogdl import clear_stale_manifest, run_gogdl
 from lutris.util.jobs import schedule_repeating_at_idle
 from lutris.util.log import logger
+from lutris.util.windows_executable import has_installer_pe_signature
 from lutris.util.wine.wine import WINE_DEFAULT_ARCH, get_default_wine_version, get_wine_path_for_version
 
 
@@ -999,13 +1000,8 @@ class CommandsMixin:
 
     @staticmethod
     def _is_installer_exe(path):
-        """Check if an .exe file is a known installer (NSIS or Inno Setup)."""
-        try:
-            with open(path, "rb") as f:
-                header = f.read(512 * 1024)
-            return b"NullsoftInst" in header or b"Inno Setup" in header
-        except OSError:
-            return False
+        """Check if an .exe file is a known installer (NSIS, Inno Setup, etc.)."""
+        return has_installer_pe_signature(path)
 
     def extract_or_run(self, data):
         """Extract an archive. If extraction yields an installer exe (NSIS/Inno),

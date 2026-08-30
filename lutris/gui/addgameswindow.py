@@ -15,6 +15,7 @@ from lutris.installer import AUTO_WIN32_EXE, get_installers
 from lutris.scanners import playtron as playtron_scanner
 from lutris.util import datapath
 from lutris.util.gog_offline import (
+    GogOfflineScan,
     build_offline_installer,
     is_archive_path,
     is_generic_windows_setup,
@@ -42,7 +43,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             "application-x-executable-symbolic",
             "go-next-symbolic",
             _("Install from a setup file"),
-            _("GOG offline installers, or a Windows executable"),
+            _("GOG offline installers, or a Windows executable or MSI"),
             "install_from_setup",
         ),
         (
@@ -75,7 +76,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         ),
     ]
 
-    def __init__(self, **kwargs):
+    def __init__(self, setup_file: str | None = None, **kwargs):
         ModelessDialog.__init__(self, title=_("Add games to Lutris"), use_header_bar=True, **kwargs)
         self.set_default_size(640, 450)
         self.search_entry = None
@@ -173,6 +174,8 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.show_all()
 
         self.load_initial_page()
+        if setup_file:
+            self.open_setup_file(setup_file)
 
     def on_back_clicked(self, _widget):
         self.stack.navigate_back()
@@ -322,6 +325,13 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         """Install from a setup file"""
         self.stack.navigate_to_page(self.present_install_from_setup_page)
 
+    def open_setup_file(self, setup_file: str) -> None:
+        """Skip the file picker and start from a path supplied on the command line."""
+        self.setup_file_chooser.set_path(setup_file)
+        self.install_from_setup()
+        if os.path.exists(setup_file):
+            self._on_setup_file_continue(None)
+
     def create_install_from_setup_page(self):
         grid = Gtk.Grid(row_spacing=6, column_spacing=6)
         label = self._get_label(_("Setup file or folder"))
@@ -335,7 +345,8 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             "Lutris groups .bin volumes with their EXE and lists every stacked "
             "installer it finds. You can uncheck extras and drag rows to change "
             "install order.\n\n"
-            "A plain Windows .exe installer still works; you will be asked for a name."
+            "A plain Windows .exe or .msi installer still works; "
+            "the game name is filled from Inno Setup metadata when available."
         )
         grid.attach(self._get_explanation_label(explanation), 0, 1, 2, 1)
         return grid
@@ -504,7 +515,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self._setup_scan_generation += 1
         self.continue_button.set_sensitive(True)
 
-    def _load_setup_packages(self, packages):
+    def _load_setup_packages(self, packages, suggested_title=""):
         self.setup_packages_store.clear()
         self._setup_name_user_edited = False
         default_kind = packages[0].kind if packages else None
@@ -516,7 +527,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             return
         self._setup_updating_name = True
         try:
-            self.install_from_setup_game_name_entry.set_text("")
+            self.install_from_setup_game_name_entry.set_text(suggested_title)
             self.on_install_from_setup_game_name_changed()
         finally:
             self._setup_updating_name = False
@@ -536,12 +547,12 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.continue_button.set_sensitive(False)
         self.set_page_title_markup(_("<b>Scanning installers…</b>"))
 
-        def on_scanned(packages, error):
-            self._on_setup_packages_scanned(generation, packages, error)
+        def on_scanned(result, error):
+            self._on_setup_packages_scanned(generation, result, error)
 
         AsyncCall(resolve_gog_offline_packages, on_scanned, path, callback_target=self)
 
-    def _on_setup_packages_scanned(self, generation, packages, error):
+    def _on_setup_packages_scanned(self, generation, result, error):
         if generation != self._setup_scan_generation:
             return
         if self.stack.get_visible_child_name() != "install_from_setup":
@@ -551,7 +562,8 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             ErrorDialog(str(error), parent=self)
             self.present_install_from_setup_page()
             return
-        packages = packages or []
+        scan = result or GogOfflineScan()
+        packages = scan.packages or []
         path = self._setup_selected_path
         if not packages and (os.path.isdir(path) or is_archive_path(path)):
             ErrorDialog(_("No GOG installers were found in that folder."), parent=self)
@@ -559,12 +571,12 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             return
         if not packages and not is_generic_windows_setup(path):
             ErrorDialog(
-                _("Select a GOG setup file, a folder of installers, or a Windows .exe."),
+                _("Select a GOG setup file, a folder of installers, or a Windows .exe or .msi."),
                 parent=self,
             )
             self.present_install_from_setup_page()
             return
-        self._load_setup_packages(packages)
+        self._load_setup_packages(packages, scan.suggested_title)
         self.stack.navigate_to_page(self.present_install_from_setup_options_page)
 
     def _on_install_setup_continue(self, _button):
@@ -627,7 +639,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             setup_path = self._setup_selected_path
             if not is_generic_windows_setup(setup_path):
                 ErrorDialog(
-                    _("Select a GOG setup file, a folder of installers, or a Windows .exe."),
+                    _("Select a GOG setup file, a folder of installers, or a Windows .exe or .msi."),
                     parent=self,
                 )
                 return
