@@ -4,21 +4,76 @@ import os
 import shlex
 import shutil
 import stat
-from textwrap import dedent
+import sys
 
 from gi.repository import GLib
 
 from lutris.api import format_installer_url
-from lutris.settings import CACHE_DIR
 from lutris.util import system
 from lutris.util.linux import LINUX_SYSTEM
 from lutris.util.log import logger
 
+# KDE Plasma will not launch .desktop files on the Desktop without the execute bit.
+_LAUNCHER_MODE = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+
+
+def _escape_desktop_value(value: str) -> str:
+    """Escape a Desktop Entry value (Name=, etc.)."""
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
+def _same_path(left: str, right: str) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normpath(left) == os.path.normpath(right)
+
+
+def _running_lutris_script() -> str | None:
+    """Absolute path to this process's Lutris entry-point script, if it exists."""
+    argv0 = sys.argv[0] if sys.argv else ""
+    if not argv0:
+        return None
+    if os.path.isabs(argv0) and os.path.isfile(argv0):
+        return os.path.realpath(argv0)
+    if os.path.sep in argv0 or argv0.startswith("."):
+        candidate = os.path.abspath(argv0)
+        if os.path.isfile(candidate):
+            return os.path.realpath(candidate)
+    found = shutil.which(argv0)
+    if found:
+        return os.path.realpath(found)
+    return None
+
+
+def _lutris_desktop_command() -> tuple[str, str | None]:
+    """Return the Exec= command prefix and an optional TryExec= value."""
+    if LINUX_SYSTEM.is_flatpak():
+        return "flatpak run net.lutris.Lutris", None
+
+    script = _running_lutris_script()
+    which_lutris = shutil.which("lutris")
+    if script and which_lutris and _same_path(script, which_lutris):
+        return "lutris", "lutris"
+    if script:
+        return f"{shlex.quote(sys.executable)} {shlex.quote(script)}", script
+    if which_lutris:
+        return "lutris", "lutris"
+    return "lutris", None
+
 
 def get_lutris_executable() -> str:
-    if LINUX_SYSTEM.is_flatpak():
-        return "flatpak run net.lutris.Lutris"
-    return "lutris"
+    """Command used to relaunch this Lutris install from a .desktop Exec= key."""
+    return _lutris_desktop_command()[0]
+
+
+def get_lutris_try_exec() -> str | None:
+    """Path or command name for TryExec=, or None to omit the key.
+
+    A hardcoded TryExec=lutris hides the shortcut when Lutris is not on PATH
+    (source checkouts, venv installs).
+    """
+    return _lutris_desktop_command()[1]
 
 
 def get_xdg_entry(directory: str) -> str | None:
@@ -56,6 +111,13 @@ def get_xdg_basename(game_slug: str, game_id: str, base_dir: str | None = None) 
     return "net.lutris.{}-{}.desktop".format(game_slug, game_id)
 
 
+def _write_launcher_file(path: str, content: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as launcher:
+        launcher.write(content)
+    os.chmod(path, _LAUNCHER_MODE)
+
+
 def create_launcher(
     game_slug: str,
     game_id: str,
@@ -66,9 +128,13 @@ def create_launcher(
 ) -> None:
     """Create a .desktop file."""
     desktop_dir = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DESKTOP)
-    if not desktop_dir:
-        raise RuntimeError("Creating launcher: unable to find directory for .desktop files")
-    lutris_executable = get_lutris_executable()
+    if desktop and not desktop_dir:
+        logger.error("Cannot create a desktop shortcut: XDG desktop directory is not set")
+        desktop = False
+    if not desktop and not menu:
+        return
+
+    lutris_executable, try_exec = _lutris_desktop_command()
 
     url = format_installer_url({"action": "rungameid", "game_slug": game_id, "launch_config_name": launch_config_name})
 
@@ -76,43 +142,31 @@ def create_launcher(
     # field code in the Exec key.
     command = f"{lutris_executable} {shlex.quote(url)}".replace("%", "%%")
 
-    try_exec = "" if LINUX_SYSTEM.is_flatpak() else "TryExec=lutris"
-
-    launcher_content = dedent(
-        """
-        [Desktop Entry]
-        Type=Application
-        Name={}
-        Icon={}
-        Exec=env LUTRIS_SKIP_INIT=1 {}
-        Categories=Game
-        {}
-        """.format(game_name, f"lutris_{game_slug}", command, try_exec)
-    )
+    lines = [
+        "[Desktop Entry]",
+        "Type=Application",
+        f"Name={_escape_desktop_value(game_name)}",
+        f"Icon=lutris_{game_slug}",
+        f"Exec=env LUTRIS_SKIP_INIT=1 {command}",
+        "Categories=Game",
+    ]
+    if try_exec:
+        lines.append(f"TryExec={try_exec}")
+    launcher_content = "\n".join(lines) + "\n"
 
     launcher_filename = get_xdg_basename(game_slug, game_id)
-    tmp_launcher_path = os.path.join(CACHE_DIR, launcher_filename)
-    with open(tmp_launcher_path, "w", encoding="utf-8") as tmp_launcher:
-        tmp_launcher.write(launcher_content)
-        tmp_launcher.close()
-    os.chmod(
-        tmp_launcher_path,
-        stat.S_IREAD | stat.S_IWRITE | stat.S_IRGRP | stat.S_IWGRP,
-    )
 
     if desktop:
-        os.makedirs(desktop_dir, exist_ok=True)
+        assert desktop_dir  # set to False above when the XDG desktop directory is missing
         launcher_path = os.path.join(desktop_dir, launcher_filename)
         logger.debug("Creating Desktop icon in %s", launcher_path)
-        shutil.copy(tmp_launcher_path, launcher_path)
+        _write_launcher_file(launcher_path, launcher_content)
     if menu:
         user_dir = os.path.expanduser("~/.local/share") if LINUX_SYSTEM.is_flatpak() else GLib.get_user_data_dir()
         menu_path = os.path.join(user_dir, "applications")
-        os.makedirs(menu_path, exist_ok=True)
         launcher_path = os.path.join(menu_path, launcher_filename)
         logger.debug("Creating menu launcher in %s", launcher_path)
-        shutil.copy(tmp_launcher_path, launcher_path)
-    os.remove(tmp_launcher_path)
+        _write_launcher_file(launcher_path, launcher_content)
 
 
 def get_launcher_path(game_slug: str, game_id: str) -> str:
@@ -122,7 +176,7 @@ def get_launcher_path(game_slug: str, game_id: str) -> str:
     """
     desktop_dir = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DESKTOP)
     if not desktop_dir:
-        raise RuntimeError("Unable to find directory for .desktop files")
+        return ""
 
     return os.path.join(desktop_dir, get_xdg_basename(game_slug, game_id, base_dir=desktop_dir))
 
