@@ -84,7 +84,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.search_explanation_label = None
         self.search_listbox = None
         self.search_timer_task = COMPLETED_IDLE_TASK
-        self.search_spinner = None
+        self.search_spinner: Gtk.Spinner = None
         self.text_query = None
         self.search_result_label = None
 
@@ -98,7 +98,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
 
         header_bar = self.get_header_bar()
 
-        self.back_button = Gtk.Button(_("Back"), no_show_all=True)
+        self.back_button = Gtk.Button(label=_("Back"), no_show_all=True)
         self.back_button.connect("clicked", self.on_back_clicked)
         key, mod = Gtk.accelerator_parse("<Alt>Left")
         self.back_button.add_accelerator("clicked", self.accelerators, key, mod, Gtk.AccelFlags.VISIBLE)
@@ -106,11 +106,11 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
         self.accelerators.connect(key, mod, Gtk.AccelFlags.VISIBLE, self.on_navigate_home)
         header_bar.pack_start(self.back_button)
 
-        self.continue_button = Gtk.Button(_("_Continue"), no_show_all=True, use_underline=True)
+        self.continue_button = Gtk.Button(label=_("_Continue"), no_show_all=True, use_underline=True)
         header_bar.pack_end(self.continue_button)
         self.continue_handler = None
 
-        self.cancel_button = Gtk.Button(_("Cancel"), use_underline=True)
+        self.cancel_button = Gtk.Button(label=_("Cancel"), use_underline=True)
         self.cancel_button.connect("clicked", self.on_cancel_clicked)
         key, mod = Gtk.accelerator_parse("Escape")
         self.cancel_button.add_accelerator("clicked", self.accelerators, key, mod, Gtk.AccelFlags.VISIBLE)
@@ -145,9 +145,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
 
         self.install_script_file_chooser = FileChooserEntry(title=_("Select script"), action=Gtk.FileChooserAction.OPEN)
 
-        self.setup_file_chooser = FileChooserEntry(
-            title=_("Select setup file"), action=Gtk.FileChooserAction.OPEN
-        )
+        self.setup_file_chooser = FileChooserEntry(title=_("Select setup file"), action=Gtk.FileChooserAction.OPEN)
         self.setup_packages_store = Gtk.ListStore(bool, str, str, object)
         self.setup_packages_frame = None
         self._setup_selected_path = ""
