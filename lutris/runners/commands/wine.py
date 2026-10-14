@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 def set_regedit(
     path,
     key,
-    value="",
+    value,
     type="REG_SZ",  # pylint: disable=redefined-builtin
     wine_path=None,
     prefix=None,
@@ -48,13 +48,18 @@ def set_regedit(
 
     Path is something like HKEY_CURRENT_USER/Software/Wine/Direct3D
     """
-    formatted_value = {
-        "REG_SZ": '"%s"' % value,
-        "REG_DWORD": "dword:" + value,
-        "REG_BINARY": "hex:" + value.replace(" ", ","),
-        "REG_MULTI_SZ": "hex(2):" + value,
-        "REG_EXPAND_SZ": "hex(7):" + value,
-    }
+    # we don't care about the value type when nulling, so just ignore it
+    if value is None:
+        logger.debug("value is Null, using - for value deletion.")
+        formatted_value = {type: "-"}
+    else:
+        formatted_value = {
+            "REG_SZ": '"%s"' % value,
+            "REG_DWORD": "dword:" + value,
+            "REG_BINARY": "hex:" + value.replace(" ", ","),
+            "REG_MULTI_SZ": "hex(2):" + value,
+            "REG_EXPAND_SZ": "hex(7):" + value,
+        }
     # Make temporary reg file
     reg_path = os.path.join(settings.CACHE_DIR, "winekeys.reg")
     with open(reg_path, "w", encoding="utf-8") as reg_file:
@@ -227,14 +232,23 @@ def create_prefix(
 
     for loop_index in range(1000):
         time.sleep(0.5)
-        if (
+        # Checked before the files, so a Umu that exits in between can't pass for a crash.
+        umu_exited = bool(umu_command and umu_command.game_process_has_exited)
+        prefix_created = (
             system.path_exists(os.path.join(prefix, "user.reg"))
             and system.path_exists(os.path.join(prefix, "userdef.reg"))
             and system.path_exists(os.path.join(prefix, "system.reg"))
-        ):
-            break
-        # Check if umu crashed before prefix was created
-        if umu_command and not umu_command.is_running:
+        )
+        # Umu writes the registry files long before it is done, so we also wait for it to exit. Until then its
+        # wineserver may still be running inside Umu's container, and a command that connects to it cannot open
+        # anything that container did not mount, such as a setup file on another drive.
+        # See https://github.com/lutris/lutris/issues/6892
+        if not umu_command:
+            if prefix_created:
+                break
+        elif umu_exited:
+            if prefix_created:
+                break
             raise RuntimeError(
                 _(
                     "Umu exited unexpectedly during prefix creation (return code: %s). "
