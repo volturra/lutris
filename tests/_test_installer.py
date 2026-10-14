@@ -142,6 +142,7 @@ class TestScriptInterpreter(TestCase):
         self.assertEqual(installer_file.dest_file, "/data/setup_game.exe")
         self.assertTrue(installer_file.is_dest_file_overridden)
 
+
 class TestCreatesGameFolder(TestCase):
     def get_installer(self, script):
         return MockInterpreter({**TEST_INSTALLER, "script": script}, None).installer

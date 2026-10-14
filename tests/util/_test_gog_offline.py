@@ -225,9 +225,7 @@ class TestResolvePath(TestCase):
         with TemporaryDirectory() as tmp:
             exe = os.path.join(tmp, "Example App 2_1.2.3_Setup.exe")
             _touch(exe)
-            scan = scan_gog_offline_directory(
-                tmp, preferred_path=exe, inspect_fn=lambda _path: ("Example App", None)
-            )
+            scan = scan_gog_offline_directory(tmp, preferred_path=exe, inspect_fn=lambda _path: ("Example App", None))
             self.assertEqual(scan.packages, [])
             self.assertEqual(scan.suggested_title, "Example App")
 
@@ -235,9 +233,7 @@ class TestResolvePath(TestCase):
         with TemporaryDirectory() as tmp:
             exe = os.path.join(tmp, "setup_MyApp.exe")
             _touch(exe)
-            scan = scan_gog_offline_directory(
-                tmp, preferred_path=exe, inspect_fn=lambda _path: ("My App", None)
-            )
+            scan = scan_gog_offline_directory(tmp, preferred_path=exe, inspect_fn=lambda _path: ("My App", None))
             self.assertEqual(scan.packages, [])
             self.assertEqual(scan.suggested_title, "My App")
 
@@ -356,9 +352,7 @@ class TestBuildOfflineInstaller(TestCase):
             GogOfflinePackage(exe_path="/data/setup_game.exe", title="Game", kind="windows"),
             GogOfflinePackage(exe_path="/data/setup_game_dlc.exe", title="DLC", kind="windows"),
         ]
-        installer = build_offline_installer(
-            packages, name="Game", game_slug="game", wine_arch="win32", win_ver="winxp"
-        )
+        installer = build_offline_installer(packages, name="Game", game_slug="game", wine_arch="win32", win_ver="winxp")
         self.assertEqual(installer["script"]["game"]["arch"], "win32")
         self.assertEqual(installer["script"]["installer"][0]["task"]["arch"], "win32")
         self.assertEqual(installer["script"]["installer"][2]["task"]["arch"], "win32")

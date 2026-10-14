@@ -52,6 +52,11 @@ from lutris.services import get_enabled_services
 from lutris.startup import init_lutris, run_all_checks
 from lutris.style_manager import StyleManager
 from lutris.util import datapath, log, resources, system
+from lutris.util.http import HTTPError, Request
+from lutris.util.log import file_handler, logger
+from lutris.util.savesync import save_check, show_save_stats, upload_save
+from lutris.util.steam.appmanifest import AppManifest, get_appmanifests
+from lutris.util.steam.config import get_steamapps_dirs
 from lutris.util.windows_executable import (
     KIND_INSTALLER,
     classify_windows_executable,
@@ -61,11 +66,6 @@ from lutris.util.windows_executable import (
     is_windows_executable,
     suggested_game_name,
 )
-from lutris.util.http import HTTPError, Request
-from lutris.util.log import file_handler, logger
-from lutris.util.savesync import save_check, show_save_stats, upload_save
-from lutris.util.steam.appmanifest import AppManifest, get_appmanifests
-from lutris.util.steam.config import get_steamapps_dirs
 
 from ..util.busy import BusyAsyncCall
 from ..util.standalone_scripts import generate_script

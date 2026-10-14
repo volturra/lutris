@@ -207,7 +207,7 @@ def group_gog_files(file_paths: Iterable[str]) -> list[GogOfflinePackage]:
                 )
             )
 
-        for stem, bins in bins_by_stem.items():
+        for stem in bins_by_stem:
             if stem not in used_stems:
                 logger.warning("GOG bin volumes have no matching installer in %s: %s", directory, stem)
 
