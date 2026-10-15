@@ -67,6 +67,8 @@ GAME_IDS = {
 
 PRODUCT_CODES = {game[0]: game[2] for game in GAME_IDS.values()}
 
+BATTLENET_CLIENT_EXES = ("battle.net launcher.exe", "battle.net.exe")
+
 
 class BattleNetCover(ServiceMedia):
     service = "battlenet"
@@ -126,6 +128,37 @@ class BattleNetService(BaseService):
             game.save()
         return games
 
+    @staticmethod
+    def _get_prefix(db_game, game_config):
+        prefix = game_config.get("prefix")
+        if prefix:
+            return prefix.rstrip("/")
+        return (db_game.get("directory") or "").split("drive_c")[0].rstrip("/")
+
+    def get_client_game(self):
+        """Return the database row of the game that holds the Battle.net client.
+
+        This is normally the game installed with the 'battlenet' installer, but the
+        client is often installed by another Wine game instead (for example a World
+        of Warcraft installer that bundles Battle.net). Any installed Wine game that
+        runs the Battle.net launcher from a prefix containing the Battle.net agent
+        database is accepted as the client."""
+        bnet_game = get_game_by_field(self.client_installer, "slug")
+        if bnet_game and bnet_game.get("installed") and bnet_game.get("directory"):
+            return bnet_game
+        for db_game in get_games(filters={"runner": "wine", "installed": "1"}):
+            if db_game.get("service") == self.id or not db_game.get("configpath"):
+                continue
+            game_config = LutrisConfig(game_config_id=db_game["configpath"]).game_level.get("game", {})
+            exe = game_config.get("exe") or ""
+            if os.path.basename(exe.replace("\\", "/")).lower() not in BATTLENET_CLIENT_EXES:
+                continue
+            prefix = self._get_prefix(db_game, game_config)
+            if prefix and os.path.exists(prefix + BlizzardProductDbParser.PRODUCT_DB_PATH):
+                logger.info("Using the Battle.net client from %s", db_game["name"])
+                return db_game
+        return None
+
     def _mark_games_uninstalled(self):
         """Mark all Battle.net games as uninstalled when the client is missing."""
         for game in get_games(filters={"service": self.id, "installed": "1"}):
@@ -133,11 +166,12 @@ class BattleNetService(BaseService):
 
     def add_installed_games(self):
         """Scan an existing Battle.net install for games"""
-        bnet_game = get_game_by_field(self.client_installer, "slug")
-        if not bnet_game or not bnet_game.get("directory"):
+        bnet_game = self.get_client_game()
+        if not bnet_game:
             self._mark_games_uninstalled()
             return
-        bnet_prefix = bnet_game["directory"].split("drive_c")[0]
+        game_config = LutrisConfig(game_config_id=bnet_game["configpath"]).game_level.get("game", {})
+        bnet_prefix = self._get_prefix(bnet_game, game_config)
         product_db_path = bnet_prefix + BlizzardProductDbParser.PRODUCT_DB_PATH
         if not os.path.exists(product_db_path):
             self._mark_games_uninstalled()
@@ -160,6 +194,9 @@ class BattleNetService(BaseService):
         lutris_game_id = service_game["slug"] + "-" + self.id
         existing_game = get_game_by_field(lutris_game_id, "installer_slug")
         if existing_game:
+            return
+        if service_game["slug"] == bnet_game["slug"]:
+            # The client lives in this game's own prefix; don't add a duplicate entry.
             return
         game_config = LutrisConfig(game_config_id=bnet_game["configpath"]).game_level
         product_code = PRODUCT_CODES.get(game.ngdp, game.ngdp)
@@ -211,9 +248,10 @@ class BattleNetService(BaseService):
 
     def generate_installer(self, db_game, bnet_db_game):
         bnet_app = Game(bnet_db_game["id"])
+        bnet_prefix = self._get_prefix(bnet_db_game, bnet_app.config.game_config)
         bnet_exe = bnet_app.config.game_config["exe"]
         if not os.path.isabs(bnet_exe):
-            bnet_exe = os.path.join(bnet_app.config.game_config["prefix"], bnet_exe)
+            bnet_exe = os.path.join(bnet_prefix, bnet_exe)
         return {
             "name": db_game["name"],
             "version": self.name,
@@ -222,7 +260,7 @@ class BattleNetService(BaseService):
             "runner": self.get_installed_runner_name(db_game),
             "appid": db_game["appid"],
             "script": {
-                "requires": self.client_installer,
+                "requires": bnet_db_game.get("installer_slug") or bnet_db_game["slug"],
                 "game": {
                     "exe": bnet_exe,
                     "client_exe": bnet_exe,
@@ -234,7 +272,7 @@ class BattleNetService(BaseService):
                             "name": "wineexec",
                             "executable": bnet_exe,
                             "args": '--exec="install %s"' % PRODUCT_CODES.get(db_game["appid"], db_game["appid"]),
-                            "prefix": bnet_app.config.game_config["prefix"],
+                            "prefix": bnet_prefix,
                             "description": (
                                 "Battle.net will now open. Please launch "
                                 "the installation of %s then close Battle.net "
@@ -250,8 +288,8 @@ class BattleNetService(BaseService):
         return self.runner
 
     def install(self, db_game, update=False):
-        bnet_game = get_game_by_field(self.client_installer, "slug")
-        if not bnet_game or not bnet_game.get("installed"):
+        bnet_game = self.get_client_game()
+        if not bnet_game:
             return super().install(db_game, update)
         application = Gio.Application.get_default()
         application.show_installer_window(
