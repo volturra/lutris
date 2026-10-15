@@ -3,6 +3,7 @@
 # pylint: disable=too-many-lines
 import os
 import shlex
+import time
 from collections.abc import Iterable
 from gettext import gettext as _
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,7 @@ from lutris.runners.commands.wine import (  # noqa: F401 pylint: disable=unused-
 )
 from lutris.runners.runner import RunDataDict, Runner
 from lutris.util import system
+from lutris.util.battlenet.client_log import BattleNetLogWatcher, is_battlenet_client
 from lutris.util.display import DISPLAY_MANAGER, get_default_dpi, is_display_x11
 from lutris.util.graphics import drivers, vkquery
 from lutris.util.linux import LINUX_SYSTEM
@@ -72,6 +74,13 @@ from lutris.util.wine.wine import (
 if TYPE_CHECKING:
     from lutris.api import RunnerVersionDict
     from lutris.monitored_command import MonitoredCommand
+
+# How long to wait for a game client such as Battle.net to start before sending it commands
+CLIENT_READY_TIMEOUT_SECONDS = 60
+# Extra delay after Battle.net reports itself ready, before it accepts --exec commands
+CLIENT_READY_SETTLE_SECONDS = 3
+# How long a game launched through a client may take to appear before the launch is given up
+CLIENT_GAME_LAUNCH_GRACE_SECONDS = 60
 
 
 def is_umu_managed_version(version: str | None) -> bool:
@@ -685,6 +694,9 @@ class wine(Runner):
         self._working_dir = working_dir
         self._wine_arch = wine_arch
         self.dll_overrides = DEFAULT_DLL_OVERRIDES.copy()  # we'll modify this, so we better copy it
+        self._client_log_watcher: BattleNetLogWatcher | None = None
+        self._client_game_seen = False
+        self._client_launch_start: float | None = None
 
     @property
     def context_menu_entries(self):
@@ -1145,7 +1157,10 @@ class wine(Runner):
     def attach_log_handlers(self, monitored_command: "MonitoredCommand", game: Game) -> None:
         """Install a umu launch-status parser when the wine executable is
         actually umu — umu's runtime/Proton setup can take a long time on the
-        first launch and there's no other indication of progress."""
+        first launch and there's no other indication of progress.
+        This runs just before the game command starts, which is also when a game
+        launched through Battle.net starts being followed in the client's log."""
+        self._start_client_game_tracking()
         try:
             wine_exe = self.get_executable()
         except MissingExecutableError:
@@ -1180,12 +1195,20 @@ class wine(Runner):
         if client_exe:
             self._ensure_client_running(client_exe)
 
+    def _start_client_game_tracking(self) -> None:
+        """Start following the game in Battle.net's log when it is launched through the client."""
+        client_exe = self.game_config.get("client_exe")
+        if client_exe and is_battlenet_client(client_exe):
+            self._client_log_watcher = BattleNetLogWatcher(self.prefix_path)
+        else:
+            self._client_log_watcher = None
+        self._client_game_seen = False
+        self._client_launch_start = None
+
     def _ensure_client_running(self, client_exe, wait_time=15):
         """Launch a client application (e.g. Battle.net) and wait for it to be ready.
         Many game clients need to be fully initialized before they can accept
         commands like --exec to launch a specific game."""
-        import time
-
         if not os.path.isabs(client_exe):
             client_exe = os.path.join(self.prefix_path, client_exe)
 
@@ -1194,6 +1217,8 @@ class wine(Runner):
             return
 
         exe_name = os.path.basename(client_exe)
+        # Watch Battle.net's log from before it starts, so the line saying it is ready isn't missed
+        ready_watcher = BattleNetLogWatcher(self.prefix_path) if is_battlenet_client(client_exe) else None
 
         # Search for the full path so we match the umu-run/pressure-vessel
         # wrapper processes, which use Unix paths.  This also implicitly
@@ -1209,8 +1234,47 @@ class wine(Runner):
             wine_path=self.get_executable(),
             arch=self.wine_arch,
         )
-        logger.info("Waiting %d seconds for client to be ready", wait_time)
-        time.sleep(wait_time)
+        if ready_watcher:
+            self._wait_for_battlenet_ready(ready_watcher)
+        else:
+            logger.info("Waiting %d seconds for client to be ready", wait_time)
+            time.sleep(wait_time)
+
+    @staticmethod
+    def _wait_for_battlenet_ready(watcher: BattleNetLogWatcher) -> None:
+        """Wait until Battle.net's log shows it is up; it drops --exec commands sent before that."""
+        logger.info("Waiting for Battle.net to be ready")
+        deadline = time.monotonic() + CLIENT_READY_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            watcher.poll()
+            if watcher.client_ready:
+                time.sleep(CLIENT_READY_SETTLE_SECONDS)
+                logger.info("Battle.net is ready")
+                return
+            time.sleep(1)
+        logger.warning("Battle.net did not report being ready after %d seconds", CLIENT_READY_TIMEOUT_SECONDS)
+
+    def keep_game_alive(self, game_pids: Iterable[int], game_thread_running: bool) -> bool:
+        """Keep a game launched through Battle.net running in Lutris while the client runs it.
+
+        The launch command only hands '--exec' to the running client and exits, and the
+        game becomes a child of the client, so the game is followed through the client's log.
+        Until the game shows up there, the launch gets CLIENT_GAME_LAUNCH_GRACE_SECONDS."""
+        watcher = self._client_log_watcher
+        if not watcher:
+            return False
+        if game_thread_running:
+            return True
+        watcher.poll()
+        if watcher.game_running:
+            self._client_game_seen = True
+            return True
+        if self._client_game_seen:
+            # The game was running and Battle.net now reports it closed
+            return False
+        if self._client_launch_start is None:
+            self._client_launch_start = time.monotonic()
+        return time.monotonic() - self._client_launch_start < CLIENT_GAME_LAUNCH_GRACE_SECONDS
 
     def get_dll_managers(self, enabled_only=False):
         """Returns the DLL managers in a dict; the keys are the managers themselves,
