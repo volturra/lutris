@@ -217,7 +217,14 @@ class BattleNetGameTracker:
             return False
         if self.launch_start is None:
             self.launch_start = time.monotonic()
-        return time.monotonic() - self.launch_start < GAME_LAUNCH_GRACE_SECONDS
+        if time.monotonic() - self.launch_start < GAME_LAUNCH_GRACE_SECONDS:
+            return True
+        logger.warning(
+            "Battle.net did not start a game within %d seconds; check that the game code in "
+            "'--exec=\"launch <code>\"' is right, the codes are case-sensitive",
+            GAME_LAUNCH_GRACE_SECONDS,
+        )
+        return False
 
 
 # Games launched through Battle.net, by game config id. They are kept outside the runner,
