@@ -4,6 +4,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from lutris.installer import AUTO_ELF_EXE, AUTO_WIN32_EXE
+from lutris.util.extract import get_innoextract_path
 from lutris.util.gog_offline import (
     GogOfflinePackage,
     bin_volume_stem,
@@ -433,3 +434,13 @@ class TestInstallerFileLocalPath(TestCase):
             },
         )
         self.assertFalse(installer_file.is_dest_file_overridden)
+
+
+class TestInnoextractPath(TestCase):
+    def test_falls_back_to_system_innoextract_without_runtime_dir(self):
+        with TemporaryDirectory() as tmp:
+            with (
+                patch("lutris.settings.RUNTIME_DIR", os.path.join(tmp, "missing")),
+                patch("lutris.util.system.find_required_executable", return_value="/usr/bin/innoextract"),
+            ):
+                self.assertEqual(get_innoextract_path(), "/usr/bin/innoextract")

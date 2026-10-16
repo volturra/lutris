@@ -935,6 +935,7 @@ class LutrisApplication(Gtk.Application):
 
     def open_local_path(self, path: str) -> None:
         """Handle a leftover filesystem path from a file manager or CLI."""
+        path = os.path.abspath(os.path.expanduser(path))
         if not os.path.exists(path):
             logger.error("No such file: %s", path)
             ErrorDialog(_("No such file: %s") % path, parent=self.window)
