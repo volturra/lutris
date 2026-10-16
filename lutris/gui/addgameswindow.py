@@ -24,6 +24,7 @@ from lutris.util.gog_offline import (
 )
 from lutris.util.jobs import COMPLETED_IDLE_TASK, AsyncCall, schedule_at_idle
 from lutris.util.strings import gtk_safe, slugify
+from lutris.util.windows_executable import suggested_game_name
 from lutris.util.wine.proton import is_proton_version
 from lutris.util.wine.wine import GE_PROTON_LATEST
 
@@ -574,7 +575,7 @@ class AddGamesWindow(ModelessDialog):  # pylint: disable=too-many-public-methods
             )
             self.present_install_from_setup_page()
             return
-        self._load_setup_packages(packages, scan.suggested_title)
+        self._load_setup_packages(packages, scan.suggested_title or suggested_game_name(path))
         self.stack.navigate_to_page(self.present_install_from_setup_options_page)
 
     def _on_install_setup_continue(self, _button):
