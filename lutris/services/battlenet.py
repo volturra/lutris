@@ -15,6 +15,7 @@ from lutris.services.base import BaseService
 from lutris.services.lutris import sync_media
 from lutris.services.service_game import ServiceGame
 from lutris.services.service_media import ServiceMedia
+from lutris.util.battlenet.client_log import is_battlenet_client
 from lutris.util.battlenet.definitions import ProductDbInfo
 from lutris.util.battlenet.product_db import ProductDb
 from lutris.util.log import logger
@@ -66,8 +67,6 @@ GAME_IDS = {
 }
 
 PRODUCT_CODES = {game[0]: game[2] for game in GAME_IDS.values()}
-
-BATTLENET_CLIENT_EXES = ("battle.net launcher.exe", "battle.net.exe")
 
 
 class BattleNetCover(ServiceMedia):
@@ -130,6 +129,7 @@ class BattleNetService(BaseService):
 
     @staticmethod
     def _get_prefix(db_game, game_config):
+        """Return a game's Wine prefix, from its config or else from the drive_c folder it is in."""
         prefix = game_config.get("prefix")
         if prefix:
             return prefix.rstrip("/")
@@ -150,14 +150,20 @@ class BattleNetService(BaseService):
             if db_game.get("service") == self.id or not db_game.get("configpath"):
                 continue
             game_config = LutrisConfig(game_config_id=db_game["configpath"]).game_level.get("game", {})
-            exe = game_config.get("exe") or ""
-            if os.path.basename(exe.replace("\\", "/")).lower() not in BATTLENET_CLIENT_EXES:
+            if not is_battlenet_client(game_config.get("exe") or ""):
                 continue
             prefix = self._get_prefix(db_game, game_config)
             if prefix and os.path.exists(prefix + BlizzardProductDbParser.PRODUCT_DB_PATH):
                 logger.info("Using the Battle.net client from %s", db_game["name"])
                 return db_game
         return None
+
+    def is_launchable(self):
+        return bool(self.get_client_game())
+
+    def get_launcher(self):
+        client_game = self.get_client_game()
+        return Game(client_game["id"]) if client_game else None
 
     def _mark_games_uninstalled(self):
         """Mark all Battle.net games as uninstalled when the client is missing."""

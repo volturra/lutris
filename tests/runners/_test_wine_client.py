@@ -9,83 +9,67 @@ setup_test_environment()
 
 from lutris.runners import wine  # noqa: E402  (must follow setup_test_environment)
 
+BATTLENET_EXE = "/pfx/drive_c/Program Files (x86)/Battle.net/Battle.net.exe"
 
-def make_watcher(game_running=False):
-    watcher = MagicMock()
-    watcher.game_running = game_running
-    return watcher
+
+def make_tracker(alive=False):
+    tracker = MagicMock()
+    tracker.is_alive.return_value = alive
+    return tracker
 
 
 class ClientKeepGameAliveTest(TestCase):
     def setUp(self):
         self.runner = wine.wine()
+        wine.BATTLENET_GAME_TRACKERS.clear()
+        self.addCleanup(wine.BATTLENET_GAME_TRACKERS.clear)
 
     def test_tracking_starts_only_for_battlenet(self):
-        bnet = "/pfx/drive_c/Program Files (x86)/Battle.net/Battle.net.exe"
-        for client_exe, expected in ((bnet, True), ("/pfx/drive_c/Other/client.exe", False), (None, False)):
+        cases = ((BATTLENET_EXE, "/pfx", True), ("/pfx/drive_c/Other/client.exe", "/pfx", False), (None, "/pfx", False))
+        cases += ((BATTLENET_EXE, None, False),)
+        for client_exe, prefix, expected in cases:
             with (
+                self.subTest(client_exe=client_exe, prefix=prefix),
                 patch.object(
                     wine.wine, "game_config", new_callable=PropertyMock, return_value={"client_exe": client_exe}
                 ),
-                patch.object(wine.wine, "prefix_path", new_callable=PropertyMock, return_value="/pfx"),
-                patch.object(wine, "BattleNetLogWatcher") as watcher_class,
+                patch.object(wine.wine, "prefix_path", new_callable=PropertyMock, return_value=prefix),
+                patch.object(wine, "BattleNetGameTracker") as tracker_class,
             ):
-                self.runner._client_game_seen = True
+                wine.BATTLENET_GAME_TRACKERS[""] = make_tracker()
                 self.runner._start_client_game_tracking()
-                self.assertEqual(self.runner._client_log_watcher is not None, expected)
-                self.assertEqual(watcher_class.called, expected)
-                self.assertFalse(self.runner._client_game_seen)
+                self.assertEqual(wine.BATTLENET_GAME_TRACKERS.get("") is tracker_class.return_value, expected)
+                self.assertEqual("" in wine.BATTLENET_GAME_TRACKERS, expected)
 
     def test_no_client_uses_normal_monitoring(self):
         self.assertFalse(self.runner.keep_game_alive(set(), game_thread_running=False))
 
     def test_alive_while_launch_command_runs(self):
-        self.runner._client_log_watcher = make_watcher()
+        wine.BATTLENET_GAME_TRACKERS[""] = make_tracker()
         self.assertTrue(self.runner.keep_game_alive(set(), game_thread_running=True))
 
     def test_alive_while_client_runs_the_game(self):
-        self.runner._client_log_watcher = make_watcher(game_running=True)
+        wine.BATTLENET_GAME_TRACKERS[""] = make_tracker(alive=True)
         self.assertTrue(self.runner.keep_game_alive(set(), game_thread_running=False))
-        self.assertTrue(self.runner._client_game_seen)
 
-    def test_quits_when_client_reports_game_closed(self):
-        watcher = make_watcher(game_running=True)
-        self.runner._client_log_watcher = watcher
-        self.runner.keep_game_alive(set(), game_thread_running=False)
-        watcher.game_running = False
+    def test_tracking_survives_a_new_runner(self):
+        """Reloading a game's configuration rebuilds its runner while the game runs."""
+        wine.BATTLENET_GAME_TRACKERS[""] = make_tracker(alive=True)
+        self.assertTrue(wine.wine().keep_game_alive(set(), game_thread_running=False))
+
+    def test_quits_and_forgets_the_game_when_it_closes(self):
+        wine.BATTLENET_GAME_TRACKERS[""] = make_tracker(alive=False)
         self.assertFalse(self.runner.keep_game_alive(set(), game_thread_running=False))
+        self.assertNotIn("", wine.BATTLENET_GAME_TRACKERS)
 
-    def test_waits_for_the_game_to_start(self):
-        self.runner._client_log_watcher = make_watcher()
-        self.assertTrue(self.runner.keep_game_alive(set(), game_thread_running=False))
-
-    def test_gives_up_after_grace_period(self):
-        self.runner._client_log_watcher = make_watcher()
-        self.runner._client_launch_start = 0.0
-        with patch.object(wine.time, "monotonic", return_value=wine.CLIENT_GAME_LAUNCH_GRACE_SECONDS + 1):
-            self.assertFalse(self.runner.keep_game_alive(set(), game_thread_running=False))
-
-
-class WaitForBattleNetTest(TestCase):
-    def test_returns_once_ready(self):
-        watcher = MagicMock()
-        watcher.client_ready = False
-
-        def poll():
-            watcher.client_ready = True
-
-        watcher.poll.side_effect = poll
-        with patch.object(wine.time, "sleep") as sleep:
-            wine.wine._wait_for_battlenet_ready(watcher)
-        sleep.assert_called_once_with(wine.CLIENT_READY_SETTLE_SECONDS)
-
-    def test_gives_up_after_timeout(self):
-        watcher = MagicMock()
-        watcher.client_ready = False
-        clock = iter([0, wine.CLIENT_READY_TIMEOUT_SECONDS + 1])
+    def test_force_stop_forgets_the_game(self):
+        wine.BATTLENET_GAME_TRACKERS[""] = make_tracker(alive=True)
         with (
-            patch.object(wine.time, "monotonic", side_effect=lambda: next(clock)),
-            patch.object(wine.time, "sleep") as sleep,
+            patch.object(wine, "winekill"),
+            patch.object(wine.wine, "prefix_path", new_callable=PropertyMock, return_value="/pfx"),
+            patch.object(wine.wine, "get_executable", return_value="wine"),
+            patch.object(wine.wine, "get_env", return_value={}),
+            patch.object(wine.Runner, "force_stop_game"),
         ):
-            wine.wine._wait_for_battlenet_ready(watcher)
-        sleep.assert_not_called()
+            self.runner.force_stop_game(set())
+        self.assertFalse(self.runner.keep_game_alive(set(), game_thread_running=False))
