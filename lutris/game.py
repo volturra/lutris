@@ -832,6 +832,10 @@ class Game:
             def configure_game(_ignored: Any, error: BaseException) -> None:
                 if error:
                     raise error
+                if self.state != self.STATE_LAUNCHING:
+                    # Stopped while the runner was getting ready, for example waiting for a client
+                    logger.info("Launch of %s was cancelled", self)
+                    return
                 self.configure_game(launch_ui_delegate)
 
             jobs.AsyncCall(self.runner.prelaunch, configure_game)

@@ -3,6 +3,7 @@
 # pylint: disable=too-many-lines
 import os
 import shlex
+import time
 from collections.abc import Iterable
 from gettext import gettext as _
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,13 @@ from lutris.runners.commands.wine import (  # noqa: F401 pylint: disable=unused-
 )
 from lutris.runners.runner import RunDataDict, Runner
 from lutris.util import system
+from lutris.util.battlenet.client_log import (
+    BattleNetLogWatcher,
+    get_game_tracker,
+    is_battlenet_client,
+    start_game_tracking,
+    stop_game_tracking,
+)
 from lutris.util.display import DISPLAY_MANAGER, get_default_dpi, is_display_x11
 from lutris.util.graphics import drivers, vkquery
 from lutris.util.linux import LINUX_SYSTEM
@@ -72,6 +80,9 @@ from lutris.util.wine.wine import (
 if TYPE_CHECKING:
     from lutris.api import RunnerVersionDict
     from lutris.monitored_command import MonitoredCommand
+
+# How long to wait for a game client to start before sending it commands
+CLIENT_READY_WAIT_SECONDS = 15
 
 
 def is_umu_managed_version(version: str | None) -> bool:
@@ -1145,7 +1156,10 @@ class wine(Runner):
     def attach_log_handlers(self, monitored_command: "MonitoredCommand", game: Game) -> None:
         """Install a umu launch-status parser when the wine executable is
         actually umu — umu's runtime/Proton setup can take a long time on the
-        first launch and there's no other indication of progress."""
+        first launch and there's no other indication of progress.
+        This runs just before the game command starts, which is also when a game
+        launched through Battle.net starts being followed in the client's log."""
+        self._start_client_game_tracking()
         try:
             wine_exe = self.get_executable()
         except MissingExecutableError:
@@ -1180,12 +1194,19 @@ class wine(Runner):
         if client_exe:
             self._ensure_client_running(client_exe)
 
-    def _ensure_client_running(self, client_exe, wait_time=15):
+    def _start_client_game_tracking(self) -> None:
+        """Start following the game in Battle.net's log when it is launched through the client."""
+        game_config_id = self.config.game_config_id
+        stop_game_tracking(game_config_id)
+        client_exe = self.game_config.get("client_exe")
+        if game_config_id and client_exe and is_battlenet_client(client_exe) and self.prefix_path:
+            start_game_tracking(game_config_id, self.prefix_path)
+
+    def _ensure_client_running(self, client_exe, wait_time=CLIENT_READY_WAIT_SECONDS):
         """Launch a client application (e.g. Battle.net) and wait for it to be ready.
         Many game clients need to be fully initialized before they can accept
-        commands like --exec to launch a specific game."""
-        import time
-
+        commands like --exec to launch a specific game. Battle.net is waited on until its log
+        says it is ready; wait_time then only applies when it writes no log at all."""
         if not os.path.isabs(client_exe):
             client_exe = os.path.join(self.prefix_path, client_exe)
 
@@ -1194,6 +1215,10 @@ class wine(Runner):
             return
 
         exe_name = os.path.basename(client_exe)
+        # Watch Battle.net's log from before it starts, so the line saying it is ready isn't missed
+        ready_watcher = (
+            BattleNetLogWatcher(self.prefix_path) if self.prefix_path and is_battlenet_client(client_exe) else None
+        )
 
         # Search for the full path so we match the umu-run/pressure-vessel
         # wrapper processes, which use Unix paths.  This also implicitly
@@ -1209,8 +1234,24 @@ class wine(Runner):
             wine_path=self.get_executable(),
             arch=self.wine_arch,
         )
-        logger.info("Waiting %d seconds for client to be ready", wait_time)
-        time.sleep(wait_time)
+        if ready_watcher:
+            ready_watcher.wait_until_ready(quiet_timeout=wait_time)
+        else:
+            logger.info("Waiting %d seconds for client to be ready", wait_time)
+            time.sleep(wait_time)
+
+    def keep_game_alive(self, game_pids: Iterable[int], game_thread_running: bool) -> bool:
+        """Keep a game launched through Battle.net running in Lutris while the client runs it.
+
+        The launch command only hands '--exec' to the running client and exits, and the
+        game becomes a child of the client, so the game is followed through the client's log."""
+        tracker = get_game_tracker(self.config.game_config_id)
+        if not tracker:
+            return False
+        if game_thread_running or tracker.is_alive():
+            return True
+        stop_game_tracking(self.config.game_config_id)
+        return False
 
     def get_dll_managers(self, enabled_only=False):
         """Returns the DLL managers in a dict; the keys are the managers themselves,
@@ -1495,6 +1536,7 @@ class wine(Runner):
     def force_stop_game(self, game_pids: Iterable[int]) -> None:
         """Kill WINE with kindness, or at least with -k. This seems to leave a process
         alive for some reason, but the caller will detect this and SIGKILL it."""
+        stop_game_tracking(self.config.game_config_id)
 
         winekill(
             self.prefix_path,
