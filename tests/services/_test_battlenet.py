@@ -1,3 +1,5 @@
+"""Tests for finding the Battle.net client among installed Wine games."""
+
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -37,9 +39,9 @@ class TestFindBattleNetClient(TestCase):
     def test_client_installed_by_another_game_is_found(self):
         game_id = self.add_wine_game("world-of-warcraft", BATTLENET_EXE)
         service = BattleNetService()
-        self.assertEqual(str(service.get_client_game()["id"]), game_id)
+        self.assertEqual(service.get_client_game()["id"], game_id)
         self.assertTrue(service.is_launchable())
-        self.assertEqual(str(service.get_launcher().id), game_id)
+        self.assertEqual(service.get_launcher().id, game_id)
 
     def test_game_that_does_not_run_battlenet_is_skipped(self):
         self.add_wine_game("some-game", "drive_c/Games/game.exe")

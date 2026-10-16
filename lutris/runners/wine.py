@@ -38,7 +38,13 @@ from lutris.runners.commands.wine import (  # noqa: F401 pylint: disable=unused-
 )
 from lutris.runners.runner import RunDataDict, Runner
 from lutris.util import system
-from lutris.util.battlenet.client_log import BattleNetGameTracker, BattleNetLogWatcher, is_battlenet_client
+from lutris.util.battlenet.client_log import (
+    BattleNetLogWatcher,
+    get_game_tracker,
+    is_battlenet_client,
+    start_game_tracking,
+    stop_game_tracking,
+)
 from lutris.util.display import DISPLAY_MANAGER, get_default_dpi, is_display_x11
 from lutris.util.graphics import drivers, vkquery
 from lutris.util.linux import LINUX_SYSTEM
@@ -77,10 +83,6 @@ if TYPE_CHECKING:
 
 # How long to wait for a game client to start before sending it commands
 CLIENT_READY_WAIT_SECONDS = 15
-
-# Games launched through Battle.net, by game config id. They live outside the runner,
-# because the game rebuilds its runner whenever its configuration is reloaded.
-BATTLENET_GAME_TRACKERS: dict[str, BattleNetGameTracker] = {}
 
 
 def is_umu_managed_version(version: str | None) -> bool:
@@ -1192,23 +1194,19 @@ class wine(Runner):
         if client_exe:
             self._ensure_client_running(client_exe)
 
-    @property
-    def _client_tracker_key(self) -> str:
-        return self.config.game_config_id if self.config and self.config.game_config_id else ""
-
     def _start_client_game_tracking(self) -> None:
         """Start following the game in Battle.net's log when it is launched through the client."""
-        BATTLENET_GAME_TRACKERS.pop(self._client_tracker_key, None)
+        game_config_id = self.config.game_config_id
+        stop_game_tracking(game_config_id)
         client_exe = self.game_config.get("client_exe")
-        if client_exe and is_battlenet_client(client_exe) and self.prefix_path:
-            BATTLENET_GAME_TRACKERS[self._client_tracker_key] = BattleNetGameTracker(
-                self.prefix_path, client_exe, system.is_process_running
-            )
+        if game_config_id and client_exe and is_battlenet_client(client_exe) and self.prefix_path:
+            start_game_tracking(game_config_id, self.prefix_path)
 
     def _ensure_client_running(self, client_exe, wait_time=CLIENT_READY_WAIT_SECONDS):
         """Launch a client application (e.g. Battle.net) and wait for it to be ready.
         Many game clients need to be fully initialized before they can accept
-        commands like --exec to launch a specific game."""
+        commands like --exec to launch a specific game. Battle.net is waited on until its log
+        says it is ready; wait_time then only applies when it writes no log at all."""
         if not os.path.isabs(client_exe):
             client_exe = os.path.join(self.prefix_path, client_exe)
 
@@ -1247,14 +1245,12 @@ class wine(Runner):
 
         The launch command only hands '--exec' to the running client and exits, and the
         game becomes a child of the client, so the game is followed through the client's log."""
-        tracker = BATTLENET_GAME_TRACKERS.get(self._client_tracker_key)
+        tracker = get_game_tracker(self.config.game_config_id)
         if not tracker:
             return False
-        if game_thread_running:
+        if game_thread_running or tracker.is_alive():
             return True
-        if tracker.is_alive():
-            return True
-        del BATTLENET_GAME_TRACKERS[self._client_tracker_key]
+        stop_game_tracking(self.config.game_config_id)
         return False
 
     def get_dll_managers(self, enabled_only=False):
@@ -1540,7 +1536,7 @@ class wine(Runner):
     def force_stop_game(self, game_pids: Iterable[int]) -> None:
         """Kill WINE with kindness, or at least with -k. This seems to leave a process
         alive for some reason, but the caller will detect this and SIGKILL it."""
-        BATTLENET_GAME_TRACKERS.pop(self._client_tracker_key, None)
+        stop_game_tracking(self.config.game_config_id)
 
         winekill(
             self.prefix_path,

@@ -13,11 +13,13 @@ import glob
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from lutris.util.log import logger
 
 CLIENT_EXES = ("battle.net.exe", "battle.net launcher.exe")
+# The processes that stay up while Battle.net runs; the launcher exits once the client starts
+CLIENT_PROCESS_NAMES = ("battle.net.exe", "agent.exe")
 CLIENT_UID = "battle.net"
 ANOTHER_INSTANCE_MESSAGE = "another instance of battle.net is running"
 
@@ -33,9 +35,39 @@ READY_SETTLE_SECONDS = 3
 GAME_LAUNCH_GRACE_SECONDS = 60
 
 
+def get_exe_name(exe_path: str) -> str:
+    """Return the lower-case file name of a Windows or Unix executable path."""
+    return os.path.basename(exe_path.replace("\\", "/")).lower()
+
+
 def is_battlenet_client(exe_path: str) -> bool:
     """Return whether an executable path points at the Battle.net client."""
-    return os.path.basename(exe_path.replace("\\", "/")).lower() in CLIENT_EXES
+    return get_exe_name(exe_path) in CLIENT_EXES
+
+
+def is_prefix_process_running(prefix_path: str, exe_names: Iterable[str]) -> bool:
+    """Return whether a Wine process for one of exe_names (lower-case file names) runs in a prefix.
+
+    Wine shows the Windows path of the program in its command line, and the prefix in
+    WINEPREFIX; a process whose environment can't be read is counted as in the prefix."""
+    exe_names = set(exe_names)
+    prefix = os.path.realpath(prefix_path)
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as cmdline_file:
+                args = cmdline_file.read().decode("utf-8", errors="replace").split("\0")[:2]
+            if not any(get_exe_name(arg) in exe_names for arg in args):
+                continue
+            with open("/proc/%s/environ" % pid, "rb") as environ_file:
+                environ = environ_file.read().decode("utf-8", errors="replace").split("\0")
+        except OSError:
+            continue
+        wine_prefix = next((var[len("WINEPREFIX=") :] for var in environ if var.startswith("WINEPREFIX=")), None)
+        if not wine_prefix or os.path.realpath(wine_prefix) == prefix:
+            return True
+    return False
 
 
 def get_log_dirs(prefix_path: str | None) -> list[str]:
@@ -156,20 +188,23 @@ class BattleNetLogWatcher:
 class BattleNetGameTracker:
     """Follows one game that Lutris launched through Battle.net, from its log and processes."""
 
-    def __init__(self, prefix_path: str | None, client_exe: str, is_process_running: Callable[[str], bool]) -> None:
+    def __init__(
+        self,
+        prefix_path: str,
+        is_process_running: Callable[[Iterable[str]], bool] | None = None,
+    ) -> None:
         self.watcher = BattleNetLogWatcher(prefix_path)
-        self.client_exe = client_exe
-        self.is_process_running = is_process_running
+        self.is_process_running = is_process_running or (lambda names: is_prefix_process_running(prefix_path, names))
         self.game_seen = False
         self.launch_start: float | None = None
 
     def _game_processes_alive(self) -> bool:
-        """Whether the game or the client is still running. Battle.net writes nothing when
-        it is killed, so the log alone would show the game running forever."""
-        if self.watcher.launched_exe and self.is_process_running(os.path.basename(self.watcher.launched_exe)):
-            return True
-        # Wine shows Windows paths in process command lines, so match on the file name
-        return self.is_process_running(os.path.basename(self.client_exe.replace("\\", "/")))
+        """Whether the game or the client is still running in the prefix. Battle.net writes
+        nothing when it is killed, so the log alone would show the game running forever."""
+        names = list(CLIENT_PROCESS_NAMES)
+        if self.watcher.launched_exe:
+            names.append(get_exe_name(self.watcher.launched_exe))
+        return self.is_process_running(names)
 
     def is_alive(self) -> bool:
         """Whether the game is running, or may still be starting."""
@@ -183,3 +218,24 @@ class BattleNetGameTracker:
         if self.launch_start is None:
             self.launch_start = time.monotonic()
         return time.monotonic() - self.launch_start < GAME_LAUNCH_GRACE_SECONDS
+
+
+# Games launched through Battle.net, by game config id. They are kept outside the runner,
+# because a game rebuilds its runner whenever its configuration is reloaded.
+_game_trackers: dict[str, BattleNetGameTracker] = {}
+
+
+def start_game_tracking(game_config_id: str, prefix_path: str) -> None:
+    """Start following a game that is about to be launched through Battle.net."""
+    _game_trackers[game_config_id] = BattleNetGameTracker(prefix_path)
+
+
+def get_game_tracker(game_config_id: str | None) -> BattleNetGameTracker | None:
+    """Return the tracker of a game launched through Battle.net, if it is being followed."""
+    return _game_trackers.get(game_config_id) if game_config_id else None
+
+
+def stop_game_tracking(game_config_id: str | None) -> None:
+    """Stop following a game."""
+    if game_config_id:
+        _game_trackers.pop(game_config_id, None)

@@ -9,8 +9,10 @@ from lutris.util.battlenet import client_log
 from lutris.util.battlenet.client_log import (
     BattleNetGameTracker,
     BattleNetLogWatcher,
+    get_exe_name,
     get_log_dirs,
     is_battlenet_client,
+    is_prefix_process_running,
 )
 
 CLIENT_READY = (
@@ -163,18 +165,19 @@ class WaitUntilReadyTest(FakePrefixTestCase):
 class BattleNetGameTrackerTest(FakePrefixTestCase):
     def setUp(self):
         super().setUp()
-        self.running_processes = {"Battle.net.exe", "WoW.exe"}
-        self.tracker = BattleNetGameTracker(
-            self.prefix,
-            "/pfx/drive_c/Program Files (x86)/Battle.net/Battle.net.exe",
-            self.running_processes.__contains__,
-        )
+        self.running_processes = {"battle.net.exe", "wow.exe"}
+        self.tracker = BattleNetGameTracker(self.prefix, lambda names: bool(self.running_processes & set(names)))
 
     def test_follows_the_game_until_battlenet_reports_it_closed(self):
         self.write_log("battle.net-1.log", LAUNCH_WOW, WOW_LAUNCHED_EXE, WOW_RUNNING)
         self.assertTrue(self.tracker.is_alive())
         self.write_log("battle.net-1.log", WOW_CLOSED)
         self.assertFalse(self.tracker.is_alive())
+
+    def test_game_started_by_a_stub_is_followed_while_the_client_runs(self):
+        self.write_log("battle.net-1.log", LAUNCH_WOW, WOW_LAUNCHED_EXE, WOW_RUNNING)
+        self.running_processes.discard("wow.exe")
+        self.assertTrue(self.tracker.is_alive())
 
     def test_game_is_closed_when_its_processes_are_gone(self):
         """Killing the prefix stops Battle.net before it can log that the game closed."""
@@ -188,3 +191,12 @@ class BattleNetGameTrackerTest(FakePrefixTestCase):
             self.assertTrue(self.tracker.is_alive())
         with patch.object(client_log.time, "monotonic", return_value=client_log.GAME_LAUNCH_GRACE_SECONDS + 1):
             self.assertFalse(self.tracker.is_alive())
+
+
+class PrefixProcessTest(TestCase):
+    def test_finds_processes_by_file_name(self):
+        with open("/proc/self/cmdline", "rb") as cmdline_file:
+            own_exe = get_exe_name(cmdline_file.read().split(b"\0")[0].decode())
+        # The test runner has no WINEPREFIX, which counts as being in any prefix
+        self.assertTrue(is_prefix_process_running("/pfx", [own_exe]))
+        self.assertFalse(is_prefix_process_running("/pfx", ["no-such-program.exe"]))

@@ -135,6 +135,10 @@ class BattleNetService(BaseService):
             return prefix.rstrip("/")
         return (db_game.get("directory") or "").split("drive_c")[0].rstrip("/")
 
+    @staticmethod
+    def _has_product_db(prefix):
+        return bool(prefix) and os.path.exists(prefix + BlizzardProductDbParser.PRODUCT_DB_PATH)
+
     def get_client_game(self):
         """Return the database row of the game that holds the Battle.net client.
 
@@ -149,12 +153,15 @@ class BattleNetService(BaseService):
         for db_game in get_games(filters={"runner": "wine", "installed": "1"}):
             if db_game.get("service") == self.id or not db_game.get("configpath"):
                 continue
+            # Reading every game's configuration is slow, so first check that the game's
+            # folder is in a prefix holding the Battle.net agent database
+            if not self._has_product_db(self._get_prefix(db_game, {})):
+                continue
             game_config = LutrisConfig(game_config_id=db_game["configpath"]).game_level.get("game", {})
             if not is_battlenet_client(game_config.get("exe") or ""):
                 continue
-            prefix = self._get_prefix(db_game, game_config)
-            if prefix and os.path.exists(prefix + BlizzardProductDbParser.PRODUCT_DB_PATH):
-                logger.info("Using the Battle.net client from %s", db_game["name"])
+            if self._has_product_db(self._get_prefix(db_game, game_config)):
+                logger.debug("Using the Battle.net client from %s", db_game["name"])
                 return db_game
         return None
 
