@@ -73,7 +73,11 @@ class TestInstallerHeuristics(TestCase):
         self.assertTrue(has_installer_filename("/tmp/game-setup.exe"))
         self.assertTrue(has_installer_filename("/tmp/Example App 2_1.2.3_Setup.exe"))
         self.assertTrue(has_installer_filename("/tmp/Installer.exe"))
+        self.assertTrue(has_installer_filename("/tmp/app_update.exe"))
+        self.assertTrue(has_installer_filename("/tmp/app_upgrade.exe"))
         self.assertFalse(has_installer_filename("/tmp/Game.exe"))
+        self.assertFalse(has_installer_filename("/tmp/Game_Full.exe"))
+        self.assertFalse(has_installer_filename("/tmp/update.exe"))
         self.assertFalse(has_installer_filename("/tmp/unins000.exe"))
 
     def test_pe_signature_and_bin_volumes(self):
@@ -86,6 +90,53 @@ class TestInstallerHeuristics(TestCase):
             self.assertTrue(has_installer_pe_signature(setup))
             self.assertTrue(has_adjacent_bin_volumes(setup))
             self.assertEqual(classify_windows_executable(setup), KIND_INSTALLER)
+
+    def test_install4j_pe_signature(self):
+        with TemporaryDirectory() as tmp:
+            exe = _touch(
+                os.path.join(tmp, "App.exe"),
+                b"MZ" + b"\x00" * 64 + b"install4j",
+            )
+            self.assertTrue(has_installer_pe_signature(exe))
+            self.assertEqual(classify_windows_executable(exe), KIND_INSTALLER)
+
+    def test_install4j_utf16_pe_signature(self):
+        with TemporaryDirectory() as tmp:
+            exe = _touch(
+                os.path.join(tmp, "App.exe"),
+                b"MZ" + b"\x00" * 64 + "Install4J".encode("utf-16le"),
+            )
+            self.assertTrue(has_installer_pe_signature(exe))
+            self.assertEqual(classify_windows_executable(exe), KIND_INSTALLER)
+
+    def test_installshield_header_signatures(self):
+        with TemporaryDirectory() as tmp:
+            exe1 = _touch(
+                os.path.join(tmp, "IS1.exe"),
+                b"MZ" + b"\x00" * 64 + b"ISSetup.dll",
+            )
+            exe2 = _touch(
+                os.path.join(tmp, "IS2.exe"),
+                b"MZ" + b"\x00" * 64 + b"setup.inx",
+            )
+            self.assertTrue(has_installer_pe_signature(exe1))
+            self.assertTrue(has_installer_pe_signature(exe2))
+            self.assertEqual(classify_windows_executable(exe1), KIND_INSTALLER)
+            self.assertEqual(classify_windows_executable(exe2), KIND_INSTALLER)
+
+    def test_tilde_path_expansion(self):
+        with TemporaryDirectory() as tmp:
+            _touch(
+                os.path.join(tmp, "App.exe"),
+                b"MZ" + b"\x00" * 64 + b"install4j",
+            )
+            with patch.dict(os.environ, {"HOME": tmp}):
+                self.assertTrue(has_installer_pe_signature("~/App.exe"))
+                self.assertEqual(classify_windows_executable("~/App.exe"), KIND_INSTALLER)
+
+    def test_update_and_upgrade_name_prefixes(self):
+        self.assertTrue(has_installer_filename("/tmp/update_game.bin"))
+        self.assertTrue(has_installer_filename("/tmp/upgrade_game.bin"))
 
     def test_gog_com_string_is_not_an_installer_signature(self):
         with TemporaryDirectory() as tmp:
@@ -161,6 +212,10 @@ class TestInstallerHeuristics(TestCase):
             "Coolgame",
         )
 
+    def test_suggested_name_is_blank_for_generic_setup(self):
+        self.assertEqual(suggested_game_name("/tmp/setup.exe"), "")
+        self.assertEqual(suggested_game_name("/tmp/Install.exe"), "")
+
 
 class TestLibraryLookup(TestCase):
     def test_same_file_paths(self):
@@ -218,6 +273,31 @@ class TestLibraryLookup(TestCase):
             os.makedirs(os.path.join(tmp, "drive_c", "Games", "Foo"))
             open(os.path.join(tmp, "user.reg"), "w", encoding="utf-8").close()
             exe = _touch(os.path.join(tmp, "drive_c", "Games", "Foo", "Foo.exe"))
+            db_game = {"id": "9", "installed": 1, "directory": tmp}
+            with (
+                patch("lutris.util.path_cache.read_path_cache", return_value={}),
+                patch("lutris.database.games.get_games", return_value=[db_game]),
+            ):
+                self.assertEqual(find_installed_game_for_path(exe), db_game)
+
+    def test_directory_match_skips_installer_pe_signature(self):
+        with TemporaryDirectory() as tmp:
+            exe = _touch(os.path.join(tmp, "Tool.exe"), b"MZ" + b"\x00" * 64 + b"install4j")
+            db_game = {"id": "9", "installed": 1, "directory": tmp}
+            with (
+                patch("lutris.util.path_cache.read_path_cache", return_value={}),
+                patch("lutris.database.games.get_games", return_value=[db_game]),
+            ):
+                self.assertIsNone(find_installed_game_for_path(exe))
+
+    def test_directory_match_ignores_pe_signature_inside_prefix_drive_c(self):
+        with TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "drive_c", "Games", "Foo"))
+            open(os.path.join(tmp, "user.reg"), "w", encoding="utf-8").close()
+            exe = _touch(
+                os.path.join(tmp, "drive_c", "Games", "Foo", "Foo.exe"),
+                b"MZ" + b"\x00" * 64 + b"Inno Setup",
+            )
             db_game = {"id": "9", "installed": 1, "directory": tmp}
             with (
                 patch("lutris.util.path_cache.read_path_cache", return_value={}),

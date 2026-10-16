@@ -25,13 +25,14 @@ KIND_UNKNOWN = "unknown"
 WINDOWS_EXECUTABLE_EXTENSIONS = {".exe", ".msi"}
 INSTALLER_SCRIPT_EXTENSIONS = {".yml", ".yaml", ".lutris"}
 
-# setup.exe, setup_game.exe, game-setup.exe, Install.exe, game_installer.exe
+# setup.exe, setup_game.exe, game-setup.exe, Install.exe, game_installer.exe, game_update.exe.
+# A bare update.exe is left out: games often ship one as a launcher updater.
 _INSTALLER_NAME_RE = re.compile(
     r"""^(?:
             (?:setup|install(?:er)?|patch)
             (?:[-_.].*)?
         |
-            .+[-_](?:setup|install(?:er)?|patch)
+            .+[-_](?:setup|install(?:er)?|patch|update|upgrade)
         )\.(?:exe|msi)$
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -40,17 +41,31 @@ _UNINSTALL_NAME_RE = re.compile(
     r"^(?:unins\d*|uninstall|uninst)(?:[-_.].*)?\.(?:exe|msi)$",
     re.IGNORECASE,
 )
+_INSTALLER_NAME_PREFIXES = ("setup_", "patch_", "update_", "upgrade_")
+# Names that say nothing about the game; better left blank for the user to fill in.
+_GENERIC_INSTALLER_TITLES = {"setup", "install", "installer", "patch", "update", "upgrade"}
 
-# Common Windows installer product signatures (Inno, NSIS, InstallShield, Wise).
-# Do not match "GOG.com": that string appears in installed GOG game binaries.
+# Common Windows installer product signatures (Inno, NSIS, InstallShield, Wise, install4j, WiX Burn, etc.).
+# Lower-case, since matching ignores case. Do not match "GOG.com": that string
+# appears in installed GOG game binaries.
 _INSTALLER_SIGNATURES = (
-    b"Inno Setup Setup Data",
-    b"Inno Setup Messages",
-    b"Inno Setup",
-    b"NullsoftInst",
-    b"Nullsoft Install System",
-    b"InstallShield",
-    b"WiseMain",
+    b"inno setup",
+    b"nullsoftinst",
+    b"nullsoft install system",
+    b"installshield",
+    b"issetup.dll",
+    b"setup.inx",
+    b"wisemain",
+    b"wise installation wizard",
+    b"install4j",
+    b"wixbundle",
+    b"advanced installer",
+)
+# Installers also store these strings as UTF-16 resources.
+_INSTALLER_SIGNATURE_PATTERNS = tuple(
+    pattern
+    for signature in _INSTALLER_SIGNATURES
+    for pattern in (signature, signature.decode("ascii").encode("utf-16-le"))
 )
 
 # GOG offline volumes are setup_foo.exe + setup_foo-1.bin (numeric index only).
@@ -159,12 +174,22 @@ def _is_inside_directory(path: str, directory: str) -> bool:
     return path.startswith(prefix) or os.path.normcase(path).startswith(os.path.normcase(prefix))
 
 
+def _normalize_path(path: str) -> str:
+    return os.path.abspath(os.path.expanduser(path))
+
+
 def _looks_like_leftover_installer(path: str) -> bool:
-    """True if this path is an installer we should not launch as a library game."""
+    """True if this path is an installer we should not launch as a library game.
+
+    PE string hits are ignored on a prefix C: drive, where installed game
+    binaries often contain them (see classify_windows_executable).
+    """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".msi":
         return True
-    return has_installer_filename(path)
+    if has_installer_filename(path):
+        return True
+    return not is_inside_prefix_drive_c(path) and has_installer_pe_signature(path)
 
 
 def _path_belongs_to_game_directory(path: str, directory: str) -> bool:
@@ -185,7 +210,7 @@ def find_installed_game_for_path(path: str) -> "DbGameDict | None":
     from lutris.database.games import get_game_by_field, get_games
     from lutris.util.path_cache import read_path_cache
 
-    path = os.path.abspath(os.path.expanduser(path))
+    path = _normalize_path(path)
     for game_id, cached_path in read_path_cache().items():
         if paths_refer_to_same_file(path, cached_path):
             db_game = get_game_by_field(game_id, "id")
@@ -212,7 +237,7 @@ def has_installer_filename(path: str) -> bool:
     if _INSTALLER_NAME_RE.match(filename):
         return True
     lower = filename.lower()
-    return lower.startswith("setup_") or lower.startswith("patch_")
+    return lower.startswith(_INSTALLER_NAME_PREFIXES)
 
 
 def has_adjacent_bin_volumes(path: str) -> bool:
@@ -234,7 +259,10 @@ def has_adjacent_bin_volumes(path: str) -> bool:
 
 def has_installer_pe_signature(path: str) -> bool:
     """Scan a small head/tail window of a PE for known installer product strings."""
-    if not path or not os.path.isfile(path):
+    if not path:
+        return False
+    path = _normalize_path(path)
+    if not os.path.isfile(path):
         return False
     try:
         size = os.path.getsize(path)
@@ -248,7 +276,8 @@ def has_installer_pe_signature(path: str) -> bool:
     except OSError as ex:
         logger.debug("Unable to read %s for installer signatures: %s", path, ex)
         return False
-    return any(signature in data for signature in _INSTALLER_SIGNATURES)
+    data = data.lower()
+    return any(pattern in data for pattern in _INSTALLER_SIGNATURE_PATTERNS)
 
 
 def is_inside_prefix_drive_c(path: str) -> bool:
@@ -267,11 +296,15 @@ def is_inside_prefix_drive_c(path: str) -> bool:
 
 
 def suggested_game_name(path: str) -> str:
-    filename = os.path.basename(path.rstrip(os.sep))
+    if not path:
+        return ""
+    path = _normalize_path(path)
+    filename = os.path.basename(path)
     if has_installer_filename(path):
         from lutris.util.gog_offline import title_from_filename
 
-        return title_from_filename(filename)
+        title = title_from_filename(filename)
+        return "" if title.lower() in _GENERIC_INSTALLER_TITLES else title
     name = os.path.splitext(filename)[0] if os.path.isfile(path) else filename
     return re.sub(r"[\s_-]+", " ", name).strip() or filename
 
@@ -280,6 +313,7 @@ def classify_windows_executable(path: str) -> str:
     """Return KIND_INSTALLER, KIND_GAME, or KIND_UNKNOWN."""
     if not path:
         return KIND_UNKNOWN
+    path = _normalize_path(path)
     if os.path.isdir(path):
         return KIND_INSTALLER
     ext = os.path.splitext(path)[1].lower()
@@ -291,7 +325,6 @@ def classify_windows_executable(path: str) -> str:
     in_drive_c = is_inside_prefix_drive_c(path)
     installer_name = has_installer_filename(path)
     has_bins = has_adjacent_bin_volumes(path)
-    has_pe = has_installer_pe_signature(path)
 
     # GOG stacked installers: setup_foo.exe + setup_foo-1.bin, even inside a prefix.
     if has_bins and installer_name:
@@ -302,6 +335,6 @@ def classify_windows_executable(path: str) -> str:
             return KIND_UNKNOWN
         # Ignore PE string hits in ordinary game binaries (false positives).
         return KIND_GAME
-    if installer_name or has_pe:
+    if installer_name or has_installer_pe_signature(path):
         return KIND_INSTALLER
     return KIND_UNKNOWN

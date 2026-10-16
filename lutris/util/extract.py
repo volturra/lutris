@@ -269,11 +269,12 @@ def get_innoextract_path() -> str:
 
 def _get_innoextract_path() -> str:
     """Return the path where innoextract is installed"""
-    inno_dirs = [path for path in os.listdir(settings.RUNTIME_DIR) if path.startswith("innoextract")]
-    for inno_dir in inno_dirs:
-        inno_path = os.path.join(settings.RUNTIME_DIR, inno_dir, "innoextract")
-        if system.path_exists(inno_path):
-            return inno_path
+    if os.path.isdir(settings.RUNTIME_DIR):
+        inno_dirs = [path for path in os.listdir(settings.RUNTIME_DIR) if path.startswith("innoextract")]
+        for inno_dir in inno_dirs:
+            inno_path = os.path.join(settings.RUNTIME_DIR, inno_dir, "innoextract")
+            if system.path_exists(inno_path):
+                return inno_path
 
     inno_path = system.find_required_executable("innoextract")
     logger.warning("innoextract not available in the runtime folder, using some random version")
