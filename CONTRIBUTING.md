@@ -53,25 +53,47 @@ is the best way to have them reviewed and merged quickly.
 Running Lutris from Git
 -----------------------
 
-Running Lutris from a local git repository is easy, it only requires cloning
-the repository and executing Lutris from there.
+Lutris is written in Python, so there is nothing to build: clone the
+repository and run it from there. `-d` prints debug messages to the terminal.
 
     git clone https://github.com/lutris/lutris
     cd lutris
     ./bin/lutris -d
 
-Make sure you have all necessary dependencies installed. It is recommended that
-you keep a copy of the stable version installed with your package manager to
-ensure that all dependencies are available.
-If you are working on newly written code that might introduce
-new dependencies, check in the package configuration files for new packages to
-install. Debian based distros will have their dependencies listed
-in `debian/control` and RPM based ones in `packaging/lutris.spec`.
+### Use your distribution's Python
 
-The PyGOject introspection libraries are not regular python packages, for that
-reason, using a virtualenv for development is heavily discouraged. Make
-sure to always use PyGOject from your distribution's package manager. Also
-install the necessary GObject bindings as described in the INSTALL file.
+Lutris needs PyGObject (the `gi` module) and the GObject introspection
+typelibs for GTK 3, WebKit2 and others. Install them with your package
+manager. The `gi` module your distribution ships is built for its own Python
+version only, so run Lutris with that Python (`/usr/bin/python3`). A Python
+from pyenv, asdf or conda, or a second system Python of another version, fails
+with errors such as `No module named 'gi'` or `cannot import name '_gi'`.
+
+### Install the dependencies
+
+The simplest way to get every dependency is to install the stable Lutris
+package and keep it installed. It also registers the desktop entry that makes
+`lutris:` links from the website open Lutris, which a git checkout does not
+do. Otherwise, install the packages listed in the INSTALL file.
+When your code adds a dependency, check the package configuration files:
+`debian/control` for Debian based distros and `packaging/lutris.spec` for RPM
+based ones.
+
+### Virtual environments
+
+A plain virtualenv hides the distribution's `gi` module, so Lutris will not
+start from one. If you want a virtualenv for the development tools, create it
+with access to the system packages:
+
+    python3 -m venv --system-site-packages .venv
+    . .venv/bin/activate
+    make dev
+    ./bin/lutris -d
+
+Do not `pip install PyGObject` into it, as that would replace the
+distribution's build. The CI test job does build PyGObject with pip in an
+isolated virtualenv, but that requires the development headers listed in
+`.github/workflows/static.yml` and is meant for running tests, not the client.
 
 Set up your development environment
 -----------------------------------
