@@ -33,6 +33,19 @@ def _create_ssl_context() -> ssl.SSLContext:
 ssl._create_default_https_context = _create_ssl_context
 
 
+def _loggable_url(url: str) -> str:
+    """Return 'url' reduced to its scheme and host, for logging.
+
+    Query strings can carry tokens (GOG's OAuth endpoints, for instance) and proxy
+    URIs can carry a username and password; neither belongs in the log.
+    """
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = "%s:%s" % (host, parsed.port)
+    return "%s://%s" % (parsed.scheme, host) if parsed.scheme else host
+
+
 def get_system_proxy(url: str) -> str | None:
     """Return the proxy URI the desktop environment would use for 'url', if any.
 
@@ -51,7 +64,7 @@ def get_system_proxy(url: str) -> str | None:
     try:
         proxies = resolver.lookup(url, None)
     except GLib.Error as ex:
-        logger.debug("Could not resolve a proxy for %s: %s", url, ex)
+        logger.debug("Could not resolve a proxy for %s: %s", _loggable_url(url), ex)
         return None
 
     for proxy in proxies or []:
@@ -60,7 +73,7 @@ def get_system_proxy(url: str) -> str | None:
         scheme = urllib.parse.urlparse(proxy).scheme
         if scheme.startswith("socks"):
             # urllib needs PySocks for SOCKS proxies, which Lutris does not depend on.
-            logger.debug("Ignoring %s proxy %s for %s", scheme, proxy, url)
+            logger.debug("Ignoring %s proxy %s for %s", scheme, _loggable_url(proxy), _loggable_url(url))
             continue
         return proxy
     return None
@@ -72,7 +85,7 @@ def get_proxy_handler(url: str) -> urllib.request.ProxyHandler | None:
     if not proxy:
         return None
     scheme = urllib.parse.urlparse(url).scheme or "https"
-    logger.debug("Using proxy %s for %s", proxy, url)
+    logger.debug("Using proxy %s for %s", _loggable_url(proxy), _loggable_url(url))
     return urllib.request.ProxyHandler({scheme: proxy})
 
 
