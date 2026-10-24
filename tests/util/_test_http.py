@@ -124,3 +124,17 @@ class TestGetRequestProxies(TestCase):
     def test_returns_an_empty_mapping_without_a_proxy(self):
         with patch.object(http, "get_system_proxy", return_value=None):
             self.assertEqual(http.get_request_proxies("https://lutris.net/"), {})
+
+
+class TestProxyLogging(TestCase):
+    def test_does_not_log_tokens_or_proxy_credentials(self):
+        url = "https://auth.gog.com/token?grant_type=refresh_token&refresh_token=SECRET_TOKEN"
+        with patch.object(http, "get_system_proxy", return_value="http://user:SECRET_PASS@proxy.example:3128"):
+            with self.assertLogs(http.logger, level="DEBUG") as logs:
+                http.get_proxy_handler(url)
+
+        output = "\n".join(logs.output)
+        self.assertNotIn("SECRET_TOKEN", output)
+        self.assertNotIn("SECRET_PASS", output)
+        self.assertIn("http://proxy.example:3128", output)
+        self.assertIn("https://auth.gog.com", output)
