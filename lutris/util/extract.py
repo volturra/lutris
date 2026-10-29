@@ -50,7 +50,7 @@ def extract_archive(
     temp_path = temp_dir = os.path.join(to_directory, ".extract-%s" % _random_id())
     try:
         _do_extract(path, temp_path, opener, mode, extractor)
-    except (OSError, zlib.error, tarfile.ReadError, EOFError) as ex:
+    except (OSError, zlib.error, tarfile.TarError, EOFError) as ex:
         logger.error("Extraction failed: %s", ex)
         raise ExtractError(str(ex)) from ex
     if merge_single:
@@ -194,7 +194,11 @@ def _do_extract(archive: str, dest: str, opener, mode: str | None = None, extrac
         _extract_AppImage(archive, dest)
     else:
         handler = opener(archive, mode)
-        handler.extractall(dest)
+        if hasattr(tarfile, "data_filter"):
+            # Refuse members with absolute paths, '..' or links leading outside 'dest'.
+            handler.extractall(dest, filter="data")
+        else:
+            handler.extractall(dest)
         handler.close()
 
 

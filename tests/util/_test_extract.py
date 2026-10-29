@@ -7,7 +7,7 @@ import zipfile
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-from lutris.util.extract import extract_archive
+from lutris.util.extract import ExtractError, extract_archive
 
 
 def make_zip(path, files):
@@ -62,3 +62,55 @@ class TestNestedArchives(TestCase):
         extract_archive(outer, self.dest, extract_nested=True)
 
         self.assertEqual(os.listdir(self.dest), ["run.sh"])
+
+
+class TestUnsafeTarMembers(TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.dest = os.path.join(self.tmp, "dest")
+        os.mkdir(self.dest)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def make_tar(self, members):
+        path = os.path.join(self.tmp, "archive.tar.gz")
+        with tarfile.open(path, "w:gz") as archive:
+            for info, data in members:
+                archive.addfile(info, io.BytesIO(data) if data is not None else None)
+        return path
+
+    def file_member(self, name, data=b"data"):
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        return info, data
+
+    def symlink_member(self, name, target):
+        info = tarfile.TarInfo(name)
+        info.type = tarfile.SYMTYPE
+        info.linkname = target
+        return info, None
+
+    def test_member_with_an_absolute_path_stays_in_the_destination(self):
+        escaped = os.path.join(self.tmp, "escaped.txt")
+        archive = self.make_tar([self.file_member(escaped)])
+        extract_archive(archive, self.dest)
+        self.assertFalse(os.path.exists(escaped))
+
+    def test_symlink_pointing_outside_the_destination_is_refused(self):
+        archive = self.make_tar([self.symlink_member("game/link", "/etc")])
+        with self.assertRaises(ExtractError):
+            extract_archive(archive, self.dest)
+
+    def test_relative_symlink_inside_the_archive_is_kept(self):
+        archive = self.make_tar(
+            [
+                self.file_member("game/lib/libfoo.so.1"),
+                self.symlink_member("game/lib/libfoo.so", "libfoo.so.1"),
+            ]
+        )
+        extract_archive(archive, self.dest)
+        link = os.path.join(self.dest, "lib", "libfoo.so")
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(os.readlink(link), "libfoo.so.1")
