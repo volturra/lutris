@@ -195,6 +195,23 @@ class TestGogdlSetupPath(TestCase):
                 self.assertEqual(self.run_gogdl.call_args.kwargs["path"], self.game_dir)
                 self.post_install.assert_called_with(self.game_dir, "windows")
 
+    def test_linux_depot_with_extras_targets_game_directory(self):
+        # Linux depots keep goggame-*.info under '<game>/game/', and extras
+        # sit next to the game directory.
+        linux_dir = os.path.join(self.tmp.name, "Linux Game")
+        os.makedirs(os.path.join(linux_dir, "game"))
+        open(os.path.join(linux_dir, "game", "goggame-2.info"), "w", encoding="utf-8").close()
+        os.remove(os.path.join(self.game_dir, "goggame-1.info"))
+        os.makedirs(os.path.join(self.tmp.name, "extras"))
+        self.interpreter.gogdl_setup({"game_id": "2", "command": "repair"})
+        self.assertEqual(self.run_gogdl.call_args.kwargs["path"], linux_dir)
+
+    def test_path_that_is_already_the_game_directory_is_kept(self):
+        os.makedirs(os.path.join(self.game_dir, "bin"))
+        self.interpreter.target_path = self.game_dir
+        self.interpreter.gogdl_setup({"game_id": "1", "command": "repair"})
+        self.assertEqual(self.run_gogdl.call_args.kwargs["path"], self.game_dir)
+
     def run_repair_or_update(self, command, nothing_to_do=False, broken_files=None):
         outcome = self.run_gogdl.return_value
         outcome.nothing_to_do = nothing_to_do

@@ -901,13 +901,24 @@ class CommandsMixin:
         gogdl creates a subdirectory named after the game's installDirectory."""
         if not os.path.isdir(parent_path):
             return parent_path
+
+        def has_info(path):
+            return os.path.isdir(path) and any(
+                f.startswith("goggame") and f.endswith(".info") for f in os.listdir(path)
+            )
+
+        # The path may already be the game directory (Windows installs keep
+        # goggame-*.info at the root, Linux ones under 'game/').
+        if has_info(parent_path) or has_info(os.path.join(parent_path, "game")):
+            return parent_path
         entries = [e for e in os.listdir(parent_path) if os.path.isdir(os.path.join(parent_path, e))]
         if len(entries) == 1:
             return os.path.join(parent_path, entries[0])
-        # Multiple dirs or none — look for goggame-*.info to find the right one
+        # Multiple dirs (e.g. the game and 'extras') or none: look for the one
+        # holding goggame-*.info, at its root or under 'game/' for Linux depots.
         for entry in entries:
             candidate = os.path.join(parent_path, entry)
-            if any(f.startswith("goggame") and f.endswith(".info") for f in os.listdir(candidate)):
+            if has_info(candidate) or has_info(os.path.join(candidate, "game")):
                 return candidate
         return parent_path
 
