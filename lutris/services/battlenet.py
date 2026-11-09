@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 from gettext import gettext as _
 
 from gi.repository import Gio
@@ -15,9 +16,12 @@ from lutris.services.base import BaseService
 from lutris.services.lutris import sync_media
 from lutris.services.service_game import ServiceGame
 from lutris.services.service_media import ServiceMedia
+from lutris.util import system
+from lutris.util.battlenet.catalog import BattleNetCatalog, CatalogProduct
 from lutris.util.battlenet.definitions import ProductDbInfo
 from lutris.util.battlenet.product_db import ProductDb
 from lutris.util.log import logger
+from lutris.util.strings import slugify
 
 GAME_IDS = {
     "s1": ("s1", "StarCraft", "S1", "starcraft-remastered"),
@@ -68,12 +72,40 @@ GAME_IDS = {
 PRODUCT_CODES = {game[0]: game[2] for game in GAME_IDS.values()}
 
 
+def copy_key_art(key_art_path, dest_path):
+    try:
+        shutil.copyfile(key_art_path, dest_path)
+    except OSError as ex:
+        logger.warning("Can't copy Battle.net key art %s: %s", key_art_path, ex)
+        return False
+    return True
+
+
+def get_key_art_path(slug):
+    """Return the Battle.net key art found for a service game, if it is still in Battle.net's cache."""
+    service_games = ServiceGameCollection.get_service_games(filters={"service": "battlenet", "slug": slug})
+    details = json.loads(service_games[0]["details"]) if service_games and service_games[0].get("details") else {}
+    key_art_path = details.get("key_art")
+    return key_art_path if key_art_path and os.path.isfile(key_art_path) else None
+
+
 class BattleNetCover(ServiceMedia):
     service = "battlenet"
     size = (176, 234)
     file_patterns = ["%s.jpg"]
     dest_path = os.path.join(settings.CACHE_DIR, "battlenet/coverart")
     api_field = "coverart"
+
+    def download(self, slug, url):
+        """Download the cover from lutris.net, or use Battle.net's own key art when it has none."""
+        result = super().download(slug, url)
+        cache_path = os.path.join(self.dest_path, self.get_filename(slug))
+        if system.path_exists(cache_path, exclude_empty=True):
+            return result
+        key_art_path = get_key_art_path(slug)
+        if key_art_path and copy_key_art(key_art_path, cache_path):
+            return cache_path
+        return result
 
 
 class BattleNetGame(ServiceGame):
@@ -84,8 +116,8 @@ class BattleNetGame(ServiceGame):
     installer_slug = "battlenet"
 
     @classmethod
-    def create(cls, blizzard_game):
-        """Create a service game from an entry from the Dolphin cache"""
+    def create(cls, blizzard_game, key_art_path=None):
+        """Create a service game from an entry of GAME_IDS"""
         service_game = cls()
         service_game.appid = blizzard_game[0]
         service_game.name = blizzard_game[1]
@@ -97,9 +129,16 @@ class BattleNetGame(ServiceGame):
                 "product_code": blizzard_game[2],
                 "slug": blizzard_game[3],
                 "coverart": "https://lutris.net/games/cover/%s.jpg" % blizzard_game[3],
+                "key_art": key_art_path,
             }
         )
         return service_game
+
+    @classmethod
+    def create_from_catalog(cls, product: CatalogProduct):
+        """Create a service game for a game that GAME_IDS doesn't know, from Battle.net's catalog"""
+        name = product.name or product.uid
+        return cls.create((product.uid, name, product.launch_code, slugify(name)), product.key_art_path)
 
 
 class BattleNetService(BaseService):
@@ -120,11 +159,27 @@ class BattleNetService(BaseService):
     def battlenet_config_path(self):
         return ""
 
+    def _get_client_prefix(self):
+        bnet_game = get_game_by_field(self.client_installer, "slug")
+        if not bnet_game or not bnet_game.get("directory"):
+            return None
+        return bnet_game["directory"].split("drive_c")[0]
+
     def load(self):
-        games = [BattleNetGame.create(game) for game in GAME_IDS.values()]
+        catalog = BattleNetCatalog(self._get_client_prefix())
+        games = []
+        for game in GAME_IDS.values():
+            product = catalog.get_product_by_launch_code(game[2])
+            games.append(BattleNetGame.create(game, product.key_art_path if product else None))
         for game in games:
             game.save()
         return games
+
+    @staticmethod
+    def _get_product_code(db_game):
+        """Return the code Battle.net launches a service game with."""
+        details = json.loads(db_game["details"]) if db_game.get("details") else {}
+        return details.get("product_code") or PRODUCT_CODES.get(db_game["appid"], db_game["appid"])
 
     def _mark_games_uninstalled(self):
         """Mark all Battle.net games as uninstalled when the client is missing."""
@@ -143,17 +198,43 @@ class BattleNetService(BaseService):
             self._mark_games_uninstalled()
             return
         parser = BlizzardProductDbParser(bnet_prefix)
+        catalog = BattleNetCatalog(bnet_prefix)
         installed_slugs = []
         for game in parser.games:
-            slug = self.install_from_battlenet(bnet_game, game)
+            slug = self.install_from_battlenet(bnet_game, game, catalog)
             if slug:
                 installed_slugs.append(slug)
         sync_media(installed_slugs)
+        self._add_missing_covers(installed_slugs)
 
-    def install_from_battlenet(self, bnet_game, game):
+    def _get_service_game(self, app_id, catalog):
+        """Return the service game of an installed Battle.net game. Battle.net's catalog is used
+        for games that GAME_IDS lists under another id, and to add the games it doesn't list."""
+        service_game = ServiceGameCollection.get_game(self.id, app_id)
+        if service_game:
+            return service_game
+        product = catalog.products.get(app_id)
+        if not product:
+            return None
+        for game_id, game in GAME_IDS.items():
+            if game[2] == product.launch_code:
+                return ServiceGameCollection.get_game(self.id, game_id)
+        BattleNetGame.create_from_catalog(product).save()
+        return ServiceGameCollection.get_game(self.id, app_id)
+
+    @staticmethod
+    def _add_missing_covers(slugs):
+        """Use Battle.net's key art for installed games that lutris.net has no cover for."""
+        for slug in slugs:
+            cover_path = os.path.join(settings.COVERART_PATH, slug + ".jpg")
+            key_art_path = get_key_art_path(slug)
+            if key_art_path and not system.path_exists(cover_path, exclude_empty=True):
+                copy_key_art(key_art_path, cover_path)
+
+    def install_from_battlenet(self, bnet_game, game, catalog=None):
         app_id = game.ngdp
         logger.debug("Installing Battle.net game %s", app_id)
-        service_game = ServiceGameCollection.get_game("battlenet", app_id)
+        service_game = self._get_service_game(app_id, catalog or BattleNetCatalog(None))
         if not service_game:
             logger.error("Aborting install, %s is not present in the game library.", app_id)
             return
@@ -162,7 +243,7 @@ class BattleNetService(BaseService):
         if existing_game:
             return
         game_config = LutrisConfig(game_config_id=bnet_game["configpath"]).game_level
-        product_code = PRODUCT_CODES.get(game.ngdp, game.ngdp)
+        product_code = (catalog and catalog.get_launch_code(app_id)) or self._get_product_code(service_game)
         game_config["game"]["args"] = '--exec="launch %s"' % product_code
         bnet_exe = game_config["game"].get("exe", "")
         if bnet_exe:
@@ -180,7 +261,7 @@ class BattleNetService(BaseService):
             installer_slug=lutris_game_id,
             configpath=configpath,
             service=self.id,
-            service_id=app_id,
+            service_id=service_game["appid"],
             platform="Windows",
         )
         return slug
@@ -202,7 +283,7 @@ class BattleNetService(BaseService):
                 "script": {
                     "requires": self.client_installer,
                     "game": {
-                        "args": '--exec="launch %s"' % PRODUCT_CODES.get(db_game["appid"], db_game["appid"]),
+                        "args": '--exec="launch %s"' % self._get_product_code(db_game),
                     },
                     "installer": [],
                 },
@@ -226,14 +307,14 @@ class BattleNetService(BaseService):
                 "game": {
                     "exe": bnet_exe,
                     "client_exe": bnet_exe,
-                    "args": '--exec="launch %s"' % PRODUCT_CODES.get(db_game["appid"], db_game["appid"]),
+                    "args": '--exec="launch %s"' % self._get_product_code(db_game),
                 },
                 "installer": [
                     {
                         "task": {
                             "name": "wineexec",
                             "executable": bnet_exe,
-                            "args": '--exec="install %s"' % PRODUCT_CODES.get(db_game["appid"], db_game["appid"]),
+                            "args": '--exec="install %s"' % self._get_product_code(db_game),
                             "prefix": bnet_app.config.game_config["prefix"],
                             "description": (
                                 "Battle.net will now open. Please launch "
