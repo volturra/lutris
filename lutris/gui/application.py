@@ -106,8 +106,6 @@ class LutrisApplication(Gtk.Application):
         self.force_updates = False
         self.css_provider = Gtk.CssProvider.new()
         self.window: LutrisWindow | None = None
-        self.launch_ui_delegate = LaunchUIDelegate()
-        self.install_ui_delegate = InstallUIDelegate()
 
         self._running_games = []
         self.app_windows: dict[str, Gtk.Window] = {}
@@ -678,8 +676,6 @@ class LutrisApplication(Gtk.Application):
             self.set_tray_icon()
             self.activate()
             if self.window:
-                self.launch_ui_delegate = self.window
-                self.install_ui_delegate = self.window
                 self.window.present()
             GLib.idle_add(self._open_local_path_idle, local_path)
             return 0
@@ -695,8 +691,6 @@ class LutrisApplication(Gtk.Application):
         service = installer_info["service"]
         appid = installer_info["appid"]
         launch_config_name = installer_info["launch_config_name"]
-
-        self.launch_ui_delegate = CommandLineUIDelegate(launch_config_name)
 
         revision = installer_info["revision"]
 
@@ -817,7 +811,7 @@ class LutrisApplication(Gtk.Application):
 
             game = Game(str(db_game["id"]))
             game.game_error.register(on_error)
-            game.launch(self.launch_ui_delegate)
+            game.launch(CommandLineUIDelegate(launch_config_name))
 
             if game.state == game.STATE_STOPPED and self.window and not self.window.is_visible():
                 self.quit()
@@ -831,10 +825,6 @@ class LutrisApplication(Gtk.Application):
                 signal.signal(signal.SIGTERM, game_stop_signal_handler)
                 signal.signal(signal.SIGINT, game_stop_signal_handler)
         elif self.window:
-            # If we're showing the window, it will handle the delegated UI
-            # from here on out, no matter what command line we got.
-            self.launch_ui_delegate = self.window
-            self.install_ui_delegate = self.window
             self.window.present()
             self.start_runtime_updates()
             # If the Lutris GUI is started by itself, don't quit it when a game stops
@@ -895,8 +885,13 @@ class LutrisApplication(Gtk.Application):
             return not self.window.is_download_queue_empty
         return False
 
-    def get_launch_ui_delegate(self) -> LaunchUIDelegate:
-        return self.launch_ui_delegate
+    @property
+    def launch_ui_delegate(self) -> LaunchUIDelegate:
+        """The delegate for launches that have no window of their own to use.
+        This is the main window once it exists, whatever command line we got;
+        choices made on the command line are passed to the launch they apply to
+        instead. Before that, it provides no UI."""
+        return self.window or LaunchUIDelegate()
 
     def get_running_games(self) -> list[Game]:
         # This method reflects games that have stopped even if the 'game-stopped' signal
@@ -1179,7 +1174,7 @@ class LutrisApplication(Gtk.Application):
         else:
             try:
                 runner = import_runner("wine")
-                runner().install(self.install_ui_delegate, version=version)
+                runner().install(InstallUIDelegate(), version=version)
                 print(f"Wine version '{version}' has been installed.")
             except (InvalidRunnerError, RunnerInstallationError) as ex:
                 print(ex.message)
@@ -1210,7 +1205,7 @@ Also, check that the version specified is in the correct format.
             if runner.is_installed():
                 print(f"'{runner_name}' is already installed.")
             else:
-                runner.install(self.install_ui_delegate, version=None, callback=None)
+                runner.install(InstallUIDelegate(), version=None, callback=None)
                 print(f"'{runner_name}' has been installed")
         except (InvalidRunnerError, RunnerInstallationError) as ex:
             print(ex.message)
