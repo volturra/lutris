@@ -717,11 +717,15 @@ class ItchIoService(OnlineService):
     def get_installer_files(self, installer, installer_file_id):
         """Replace the user provided file with download links from itch.io"""
 
-        key = self.get_key(installer.service_appid)
+        # Without an itch.io id, or when not logged in, fall back to asking the
+        # user for the file instead of aborting the install.
+        if not installer.service_appid:
+            raise UnavailableGameError(_("The installer has no itch.io game id."))
         try:
+            key = self.get_key(installer.service_appid)
             uploads = self.fetch_uploads(installer.service_appid, key)
-        except HTTPError as ex:
-            raise UnavailableGameError from ex
+        except (HTTPError, UnauthorizedAccessError) as ex:
+            raise UnavailableGameError(_("Unable to get the files for this game from itch.io.")) from ex
         filtered = []
         files = []
         link = None
@@ -794,11 +798,15 @@ class ItchIoService(OnlineService):
 
     def get_extras_files(self, installer, selected_extras):
         """Download selected extras from itch.io"""
-        key = self.get_key(installer.service_appid)
+        # Without an itch.io id, or when not logged in, fall back to asking the
+        # user for the file instead of aborting the install.
+        if not installer.service_appid:
+            raise UnavailableGameError(_("The installer has no itch.io game id."))
         try:
+            key = self.get_key(installer.service_appid)
             uploads = self.fetch_uploads(installer.service_appid, key)
-        except HTTPError as ex:
-            raise UnavailableGameError from ex
+        except (HTTPError, UnauthorizedAccessError) as ex:
+            raise UnavailableGameError(_("Unable to get the files for this game from itch.io.")) from ex
 
         selected_extras_ids = set(str(x["id"]) for x in selected_extras)
         extra_files = []
