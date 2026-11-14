@@ -169,7 +169,12 @@ class WinePrefixManager:
                 continue
             # Templates lives under AppData, so keep the path below C:\users\<name>
             folder_path = PureWindowsPath(folder)
-            if len(folder_path.parts) > 3 and folder_path.is_relative_to("C:/users"):
+            if ".." in folder_path.parts or not folder_path.name:
+                # The registry can be written by anything in the prefix; never let it
+                # point the desktop folders outside the user directory.
+                logger.warning("Ignoring shell folder %s for %s", folder, key)
+                desktop_folders.append(default_folder)
+            elif len(folder_path.parts) > 3 and folder_path.is_relative_to("C:/users"):
                 desktop_folders.append(os.path.join(*folder_path.parts[3:]))
             else:
                 desktop_folders.append(folder_path.name)

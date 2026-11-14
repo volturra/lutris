@@ -132,3 +132,19 @@ class TestDesktopIntegration(unittest.TestCase):
         folders = WinePrefixManager(self.prefix_path).get_desktop_folders()
 
         self.assertEqual(folders[prefix.DESKTOP_XDG.index("PICTURES")], "Pictures")
+
+    def test_parent_references_fall_back_to_the_default_folder(self):
+        shell_folders = dict(SHELL_FOLDERS)
+        shell_folders["Personal"] = PureWindowsPath("C:/users/lutrisuser/../../../../../home/v/.ssh")
+        shell_folders["My Music"] = PureWindowsPath("C:/users/lutrisuser/AppData/../../../../x")
+        shell_folders["My Videos"] = PureWindowsPath("Z:/")
+        self.write_user_reg(shell_folders)
+
+        folders = WinePrefixManager(self.prefix_path).get_desktop_folders()
+
+        self.assertEqual(folders[prefix.DESKTOP_XDG.index("DOCUMENTS")], "Documents")
+        self.assertEqual(folders[prefix.DESKTOP_XDG.index("MUSIC")], "Music")
+        self.assertEqual(folders[prefix.DESKTOP_XDG.index("VIDEOS")], "Videos")
+        for folder in folders:
+            path = os.path.realpath(os.path.join(self.user_dir, folder))
+            self.assertTrue(path.startswith(os.path.realpath(self.user_dir) + os.sep), folder)
