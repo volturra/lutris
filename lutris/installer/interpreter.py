@@ -205,7 +205,9 @@ class ScriptInterpreter(GObject.Object, CommandsMixin):
                     # which the installer looks up by this; it must name the game we
                     # picked, not the list of alternatives. An 'extends' script just adds
                     # files to the game it extends, and never looks at 'requires'.
-                    self.installer.requires = game["installer_slug"]
+                    # Games added by hand have no installer_slug; their slug is
+                    # what get_game_config falls back to.
+                    self.installer.requires = game["installer_slug"] or game["slug"]
 
     def get_extras(self):
         """Get extras and store them to move them at the end of the install"""

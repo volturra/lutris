@@ -189,6 +189,28 @@ class TestAlternativeDependencies(TestCase):
         self.assertEqual(interpreter.installer.get_game_config()["requires"], "quake-gog")
 
 
+class TestDependencyWithoutInstallerSlug(TestCase):
+    def setUp(self):
+        self.game_id = add_game(
+            name="Quake",
+            slug="quake-manual",
+            runner="linux",
+            directory="/tmp",
+            installed=1,
+            configpath="quake-manual",
+        )
+
+    def tearDown(self):
+        delete_game(self.game_id)
+
+    def test_keeps_the_base_game_when_it_was_added_by_hand(self):
+        script = {"requires": "quake-manual", "game": {"exe": "quake-mod"}}
+        interpreter = ScriptInterpreter({**TEST_INSTALLER, "script": script}, None)
+        self.assertEqual(interpreter.target_path, "/tmp")
+        self.assertEqual(interpreter.installer.requires, "quake-manual")
+        self.assertFalse(interpreter.installer.creates_game_folder)
+
+
 class TestCreatesGameFolder(TestCase):
     def get_installer(self, script):
         return MockInterpreter({**TEST_INSTALLER, "script": script}, None).installer
