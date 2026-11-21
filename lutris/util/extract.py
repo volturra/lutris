@@ -49,10 +49,16 @@ def extract_archive(
 
     temp_path = temp_dir = os.path.join(to_directory, ".extract-%s" % _random_id())
     try:
-        _do_extract(path, temp_path, opener, mode, extractor)
-    except (OSError, zlib.error, tarfile.TarError, EOFError) as ex:
-        logger.error("Extraction failed: %s", ex)
-        raise ExtractError(str(ex)) from ex
+        try:
+            _do_extract(path, temp_path, opener, mode, extractor)
+        except (OSError, zlib.error, tarfile.TarError, EOFError) as ex:
+            logger.error("Extraction failed: %s", ex)
+            raise ExtractError(str(ex)) from ex
+    except ExtractError:
+        # Don't leave a partial extraction behind in the destination
+        if os.path.isdir(temp_dir):
+            system.delete_folder(temp_dir)
+        raise
     if merge_single:
         extracted = os.listdir(temp_path)
         if len(extracted) == 1:
@@ -221,7 +227,24 @@ def _extract_7zip(path: str, dest: str, archive_type: str | None = None) -> None
     command = [_7zip_path, "x", path, "-o{}".format(dest), "-aoa"]
     if archive_type and archive_type != "auto":
         command.append("-t{}".format(archive_type))
-    subprocess.call(command)
+    process = subprocess.run(command, stderr=subprocess.PIPE, check=False)
+    errors = process.stderr.decode(errors="replace").strip()
+    if errors:
+        logger.warning("7-Zip reported: %s", errors)
+    # 1 means there were only warnings; 2 and up mean some or all of it was not extracted
+    if process.returncode >= 2 and not _only_skipped_symlinks(errors):
+        raise ExtractError("7-Zip could not extract %s (exit code %s)" % (os.path.basename(path), process.returncode))
+
+
+# Newer 7-Zip refuses symlinks it deems unsafe, including some whose target stays inside
+# the archive, and exits with an error even though everything else was extracted.
+_7ZIP_SKIPPED_SYMLINK = "ERROR: Dangerous symbolic link path was ignored"
+
+
+def _only_skipped_symlinks(errors: str) -> bool:
+    """True if every error 7-Zip reported is a symlink it skipped, which we treat as a warning."""
+    error_lines = [line.strip() for line in errors.splitlines() if line.strip().startswith("ERROR:")]
+    return bool(error_lines) and all(line.startswith(_7ZIP_SKIPPED_SYMLINK) for line in error_lines)
 
 
 def _get_7zip_path() -> str:
@@ -248,7 +271,7 @@ def _extract_exe(path: str, dest: str) -> None:
         if return_code == 0:
             _extract_7zip(path, dest)
         else:
-            raise RuntimeError("specified exe is not an archive or GOG setup file")
+            raise ExtractError("specified exe is not an archive or GOG setup file")
 
 
 def _check_inno_exe(path) -> bool:
@@ -273,7 +296,7 @@ def _decompress_gog(file_path: str, destination_path: str) -> None:
     if process.returncode != 0:
         stderr = process.stderr.decode().strip()
         logger.error("Innoextract failed to extract GOG setup file: %s", stderr)
-        raise RuntimeError("innoextract failed to extract GOG setup file")
+        raise ExtractError("innoextract failed to extract GOG setup file")
 
 
 def get_innoextract_path() -> str:
@@ -299,7 +322,7 @@ def _extract_gog(path: str, dest: str) -> None:
     if _check_inno_exe(path):
         _decompress_gog(path, dest)
     else:
-        raise RuntimeError("specified exe is not a GOG setup file")
+        raise ExtractError("specified exe is not a GOG setup file")
 
 
 def _extract_deb(archive: str, dest: str) -> None:

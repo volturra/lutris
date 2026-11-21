@@ -7,7 +7,7 @@ import zipfile
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-from lutris.util.extract import ExtractError, extract_archive
+from lutris.util.extract import ExtractError, _only_skipped_symlinks, extract_archive
 
 
 def make_zip(path, files):
@@ -114,3 +114,71 @@ class TestUnsafeTarMembers(TestCase):
         link = os.path.join(self.dest, "lib", "libfoo.so")
         self.assertTrue(os.path.islink(link))
         self.assertEqual(os.readlink(link), "libfoo.so.1")
+
+
+class TestFailedExtraction(TestCase):
+    """7-Zip's exit status must be checked, or a damaged archive installs only partly."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dest = os.path.join(self._tmp.name, "dest")
+        os.mkdir(self.dest)
+        # Random data doesn't compress, so cutting the archive short cuts off whole files
+        self.files = {"first.bin": os.urandom(100_000), "second.bin": os.urandom(100_000)}
+        self.archive = os.path.join(self._tmp.name, "game.zip")
+        make_zip(self.archive, self.files)
+
+    def test_truncated_archive_is_an_error(self):
+        with open(self.archive, "rb") as archive_file:
+            data = archive_file.read()
+        with open(self.archive, "wb") as archive_file:
+            archive_file.write(data[: len(data) * 3 // 4])
+        with self.assertRaises(ExtractError):
+            extract_archive(self.archive, self.dest)
+        self.assertEqual(os.listdir(self.dest), [])
+
+    def test_file_that_is_not_an_archive_is_an_error(self):
+        with open(self.archive, "wb") as archive_file:
+            archive_file.write(os.urandom(10_000))
+        with self.assertRaises(ExtractError):
+            extract_archive(self.archive, self.dest)
+        self.assertEqual(os.listdir(self.dest), [])
+
+    def test_exe_that_is_not_an_archive_is_an_error(self):
+        setup_path = os.path.join(self._tmp.name, "setup.exe")
+        with open(setup_path, "wb") as setup_file:
+            setup_file.write(os.urandom(10_000))
+        with self.assertRaises(ExtractError):
+            extract_archive(setup_path, self.dest)
+        self.assertEqual(os.listdir(self.dest), [])
+
+    def test_data_after_the_archive_is_tolerated(self):
+        with open(self.archive, "ab") as archive_file:
+            archive_file.write(os.urandom(5_000))
+        extract_archive(self.archive, self.dest, merge_single=False)
+        self.assertEqual(sorted(os.listdir(self.dest)), sorted(self.files))
+
+    def test_symlink_7zip_skips_is_only_a_warning(self):
+        # 7-Zip 22+ refuses this link even though it points inside the archive
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            archive.writestr("game/sub/a", b"data")
+            link = zipfile.ZipInfo("game/sub/deep/l")
+            link.create_system = 3
+            link.external_attr = 0o120777 << 16
+            archive.writestr(link, "../a")
+        extract_archive(self.archive, self.dest)
+        self.assertTrue(os.path.isfile(os.path.join(self.dest, "sub", "a")))
+
+
+class TestOnlySkippedSymlinks(TestCase):
+    SKIPPED = "ERROR: Dangerous symbolic link path was ignored : game/l : ../a"
+
+    def test_skipped_symlinks_alone_are_a_warning(self):
+        self.assertTrue(_only_skipped_symlinks(self.SKIPPED + "\n" + self.SKIPPED))
+
+    def test_any_other_error_is_still_an_error(self):
+        self.assertFalse(_only_skipped_symlinks(self.SKIPPED + "\nERROR: CRC Failed : second.bin"))
+
+    def test_no_errors_reported_is_not_a_pass(self):
+        self.assertFalse(_only_skipped_symlinks(""))
