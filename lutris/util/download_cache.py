@@ -281,6 +281,10 @@ def sweep_installer_cache() -> None:
         if os.path.islink(folder) or not os.path.isdir(folder):
             continue
         # The user's own download cache could be set to a folder in here; never sweep that
-        if custom_cache_path and (path_contains(folder, custom_cache_path) or path_contains(custom_cache_path, folder)):
+        # Resolve links, as the cache may be spelled through a link to another drive
+        if custom_cache_path and (
+            path_contains(folder, custom_cache_path, resolve_symlinks=True)
+            or path_contains(custom_cache_path, folder, resolve_symlinks=True)
+        ):
             continue
         safe_delete_folder(folder)

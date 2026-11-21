@@ -378,3 +378,12 @@ class TestSweepInstallerCache(TestCase):
         self.custom_cache = str(self.cache / "my-downloads")
         download_cache.sweep_installer_cache()
         self.assertTrue(kept.is_file())
+
+    def test_custom_download_cache_reached_through_a_link_is_left_alone(self):
+        kept = self.add_download("my-downloads")
+        # The user's cache folder is spelled through a link to the same place
+        link = self.cache.parent / "elsewhere"
+        link.symlink_to(self.cache)
+        self.custom_cache = str(link / "my-downloads")
+        download_cache.sweep_installer_cache()
+        self.assertTrue(kept.is_file())
