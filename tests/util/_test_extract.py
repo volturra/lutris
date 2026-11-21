@@ -7,7 +7,7 @@ import zipfile
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-from lutris.util.extract import ExtractError, extract_archive
+from lutris.util.extract import ExtractError, _only_skipped_symlinks, extract_archive
 
 
 def make_zip(path, files):
@@ -158,3 +158,27 @@ class TestFailedExtraction(TestCase):
             archive_file.write(os.urandom(5_000))
         extract_archive(self.archive, self.dest, merge_single=False)
         self.assertEqual(sorted(os.listdir(self.dest)), sorted(self.files))
+
+    def test_symlink_7zip_skips_is_only_a_warning(self):
+        # 7-Zip 22+ refuses this link even though it points inside the archive
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            archive.writestr("game/sub/a", b"data")
+            link = zipfile.ZipInfo("game/sub/deep/l")
+            link.create_system = 3
+            link.external_attr = 0o120777 << 16
+            archive.writestr(link, "../a")
+        extract_archive(self.archive, self.dest)
+        self.assertTrue(os.path.isfile(os.path.join(self.dest, "sub", "a")))
+
+
+class TestOnlySkippedSymlinks(TestCase):
+    SKIPPED = "ERROR: Dangerous symbolic link path was ignored : game/l : ../a"
+
+    def test_skipped_symlinks_alone_are_a_warning(self):
+        self.assertTrue(_only_skipped_symlinks(self.SKIPPED + "\n" + self.SKIPPED))
+
+    def test_any_other_error_is_still_an_error(self):
+        self.assertFalse(_only_skipped_symlinks(self.SKIPPED + "\nERROR: CRC Failed : second.bin"))
+
+    def test_no_errors_reported_is_not_a_pass(self):
+        self.assertFalse(_only_skipped_symlinks(""))
