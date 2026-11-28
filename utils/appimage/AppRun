@@ -45,10 +45,23 @@ export APPDIR="$HERE"
 # user-home access and spawns Wine binaries — a WebKit sandbox layered
 # on top adds negligible additional isolation, and disabling it is
 # standard practice for AppImage-packaged WebKitGTK apps.
+#
+# The patched path is fixed and /tmp is shared, so only use a directory
+# we own. If another user owns it, they choose which helpers WebKit runs
+# as us whether or not we touch it, so refuse to start.
 if [ -d "$HERE/usr/lib/webkit2gtk-4.1" ]; then
-    mkdir -p /tmp/.lutris-appimage.dir
-    ln -snf "$HERE/usr/lib/webkit2gtk-4.1" /tmp/.lutris-appimage.dir/webkit2gtk-4.1
-    export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+    WEBKIT_LINK_DIR=/tmp/.lutris-appimage.dir
+    mkdir -m 700 "$WEBKIT_LINK_DIR" 2>/dev/null || true
+    if [ ! -L "$WEBKIT_LINK_DIR" ] && [ -d "$WEBKIT_LINK_DIR" ] && [ -O "$WEBKIT_LINK_DIR" ]; then
+        # Older AppRuns created this with the default umask.
+        chmod 700 "$WEBKIT_LINK_DIR"
+        rm -rf "$WEBKIT_LINK_DIR/webkit2gtk-4.1"
+        ln -sfn "$HERE/usr/lib/webkit2gtk-4.1" "$WEBKIT_LINK_DIR/webkit2gtk-4.1"
+        export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+    else
+        echo "Lutris AppImage: $WEBKIT_LINK_DIR is missing or not a directory you own; it must be removed before Lutris can start" >&2
+        exit 1
+    fi
 fi
 
 # GLib's GIO looks for extension modules (TLS backends, proxy resolvers,
