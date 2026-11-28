@@ -46,22 +46,20 @@ export APPDIR="$HERE"
 # on top adds negligible additional isolation, and disabling it is
 # standard practice for AppImage-packaged WebKitGTK apps.
 #
-# The patched path is fixed and /tmp is shared, so only use a folder we
-# own. If another user owns it, they choose which helpers WebKit runs as
-# us whether or not we touch it, so refuse to start.
-WEBKIT_LINK_DIR=/tmp/.lutris-appimage.dir
+# The patched path is fixed and /tmp is shared, so only use a directory
+# we own. If another user owns it, they choose which helpers WebKit runs
+# as us whether or not we touch it, so refuse to start.
 if [ -d "$HERE/usr/lib/webkit2gtk-4.1" ]; then
+    WEBKIT_LINK_DIR=/tmp/.lutris-appimage.dir
     mkdir -m 700 "$WEBKIT_LINK_DIR" 2>/dev/null || true
-    if [ -d "$WEBKIT_LINK_DIR" ] && [ ! -L "$WEBKIT_LINK_DIR" ] && [ -O "$WEBKIT_LINK_DIR" ]; then
-        # An older AppRun made this folder with the default umask, so
-        # replace what is in it rather than trust it.
+    if [ ! -L "$WEBKIT_LINK_DIR" ] && [ -d "$WEBKIT_LINK_DIR" ] && [ -O "$WEBKIT_LINK_DIR" ]; then
+        # Older AppRuns created this with the default umask.
         chmod 700 "$WEBKIT_LINK_DIR"
         rm -rf "$WEBKIT_LINK_DIR/webkit2gtk-4.1"
-        ln -s "$HERE/usr/lib/webkit2gtk-4.1" "$WEBKIT_LINK_DIR/webkit2gtk-4.1"
+        ln -sfn "$HERE/usr/lib/webkit2gtk-4.1" "$WEBKIT_LINK_DIR/webkit2gtk-4.1"
         export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
     else
-        echo "Lutris AppImage: $WEBKIT_LINK_DIR is not a folder you own." >&2
-        echo "It must be removed (by its owner, an administrator, or a reboot) before Lutris can start safely." >&2
+        echo "Lutris AppImage: $WEBKIT_LINK_DIR is missing or not a directory you own; it must be removed before Lutris can start" >&2
         exit 1
     fi
 fi
